@@ -122,6 +122,13 @@ class FullIndexer:
         # Detect technologies in the full text
         technologies = self.parser.detect_technologies(full_text)
         
+        # Get last active timestamp
+        last_timestamp = session.get_last_timestamp()
+        last_active = None
+        if last_timestamp:
+            from datetime import datetime
+            last_active = datetime.fromtimestamp(last_timestamp / 1000).isoformat()
+        
         for idx, text in enumerate(text_chunks):
             chunk_id = f"{session.task_id}_{idx}"
             chunks.append(Chunk(
@@ -133,7 +140,8 @@ class FullIndexer:
                     chunk_index=idx,
                     files_in_context=session.metadata.files_in_context,
                     message_type="mixed",
-                    technologies=technologies
+                    technologies=technologies,
+                    last_active=last_active
                 )
             ))
         

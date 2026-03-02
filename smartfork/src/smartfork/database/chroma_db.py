@@ -44,13 +44,29 @@ class ChromaDatabase:
         Args:
             chunks: List of Chunk objects to add
         """
+        import json
+        
         if not chunks:
             return
         
         ids = [chunk.id for chunk in chunks]
         documents = [chunk.content for chunk in chunks]
         embeddings = [chunk.embedding for chunk in chunks if chunk.embedding]
-        metadatas = [chunk.metadata.model_dump() for chunk in chunks]
+        
+        # Convert metadata to ChromaDB-compatible format (no lists, no None values)
+        metadatas = []
+        for chunk in chunks:
+            meta = chunk.metadata.model_dump()
+            # Convert lists to JSON strings and remove None values
+            cleaned_meta = {}
+            for key, value in meta.items():
+                if value is None:
+                    continue  # Skip None values
+                elif isinstance(value, list):
+                    cleaned_meta[key] = json.dumps(value)
+                else:
+                    cleaned_meta[key] = value
+            metadatas.append(cleaned_meta)
         
         # If no embeddings provided, ChromaDB will generate them
         if embeddings and len(embeddings) == len(chunks):
@@ -165,6 +181,8 @@ class ChromaDatabase:
         Returns:
             List of Chunk objects
         """
+        import json
+        
         results = self.collection.get(
             where={"session_id": session_id},
             include=["documents", "metadatas"]
@@ -173,7 +191,15 @@ class ChromaDatabase:
         chunks = []
         if results and results.get('ids'):
             for i, chunk_id in enumerate(results['ids']):
-                metadata = ChunkMetadata(**results['metadatas'][i])
+                meta_dict = results['metadatas'][i]
+                # Deserialize JSON strings back to lists
+                for key, value in meta_dict.items():
+                    if isinstance(value, str) and value.startswith('['):
+                        try:
+                            meta_dict[key] = json.loads(value)
+                        except json.JSONDecodeError:
+                            pass
+                metadata = ChunkMetadata(**meta_dict)
                 chunks.append(Chunk(
                     id=chunk_id,
                     content=results['documents'][i],

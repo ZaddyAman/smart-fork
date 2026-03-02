@@ -58,6 +58,13 @@ class TaskSession(BaseModel):
         code_blocks.extend(matches)
         
         return code_blocks
+    
+    def get_last_timestamp(self) -> Optional[int]:
+        """Get the last timestamp from the conversation."""
+        for msg in reversed(self.conversation):
+            if msg.timestamp:
+                return msg.timestamp
+        return None
 
 
 class ChunkMetadata(BaseModel):
@@ -69,6 +76,7 @@ class ChunkMetadata(BaseModel):
     files_in_context: List[str] = []
     message_type: str = "mixed"  # "user", "assistant", "tool", "mixed"
     technologies: List[str] = []
+    last_active: Optional[str] = None  # ISO timestamp for recency scoring
 
 
 class Chunk(BaseModel):
@@ -87,8 +95,37 @@ class SearchResult(BaseModel):
     metadata: Dict[str, Any]
 
 
+class HybridResult(BaseModel):
+    """Result from hybrid search with score breakdown."""
+    session_id: str
+    score: float
+    breakdown: Dict[str, float]
+    metadata: Dict[str, Any]
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "score": self.score,
+            "breakdown": self.breakdown,
+            "metadata": self.metadata
+        }
+
+
 class IndexingResult(BaseModel):
     """Result of indexing operation."""
     indexed: int = 0
     failed: int = 0
     chunks_created: int = 0
+
+
+class SessionMetadata(BaseModel):
+    """Enriched session metadata."""
+    session_id: str
+    technologies: List[str] = []
+    files_in_context: List[str] = []
+    code_languages: List[str] = []
+    estimated_tokens: int = 0
+    has_errors: bool = False
+    has_tests: bool = False
+    last_active: Optional[datetime] = None
+    session_title: Optional[str] = None

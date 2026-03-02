@@ -28,6 +28,11 @@ class SmartForkConfig(BaseSettings):
         description="Path to ChromaDB storage"
     )
     
+    cache_dir: Path = Field(
+        default=Path.home() / ".smartfork/cache",
+        description="Path to cache directory"
+    )
+    
     # Indexing settings
     chunk_size: int = Field(default=512, description="Size of chunks in words")
     chunk_overlap: int = Field(default=128, description="Overlap between chunks")

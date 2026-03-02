@@ -3,18 +3,26 @@
 import typer
 from pathlib import Path
 from typing import Optional, List
+from datetime import datetime, timedelta
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
+from rich.tree import Tree
 from loguru import logger
 import sys
+import json
 
 from .config import get_config
 from .database.chroma_db import ChromaDatabase
 from .indexer.indexer import FullIndexer, IncrementalIndexer
 from .indexer.watcher import TranscriptWatcher
-from .search.semantic import SemanticSearchEngine
+from .search.hybrid import HybridSearchEngine
+from .fork.generator import ForkMDGenerator
+from .intelligence.pre_compaction import CompactionManager
+from .intelligence.clustering import SessionClusterer
+from .intelligence.branching import BranchingTree
+from .intelligence.privacy import PrivacyVault
 
 app = typer.Typer(help="SmartFork - AI Session Intelligence for Kilo Code")
 console = Console()
@@ -125,15 +133,14 @@ def index(
 def search(
     query: str = typer.Argument(..., help="Search query"),
     n_results: int = typer.Option(5, "--results", "-n", help="Number of results"),
-    technology: Optional[List[str]] = typer.Option(None, "--tech", "-t", help="Filter by technology"),
-    file: Optional[List[str]] = typer.Option(None, "--file", "-f", help="Filter by file path"),
+    path: Optional[Path] = typer.Option(None, "--path", "-p", help="Current directory for path matching"),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
 ):
-    """Search indexed sessions."""
+    """Search indexed sessions using hybrid search (semantic + BM25 + recency + path)."""
     config = get_config()
     
     db = ChromaDatabase(config.chroma_db_path)
-    engine = SemanticSearchEngine(db)
+    engine = HybridSearchEngine(db)
     
     if db.get_session_count() == 0:
         console.print("[yellow]No sessions indexed. Run 'smartfork index' first.[/yellow]")
@@ -141,57 +148,62 @@ def search(
     
     console.print(f"[bold]Searching for:[/bold] {query}\n")
     
-    results = engine.search(
-        query, 
-        n_results=n_results,
-        technologies=technology,
-        files=file
-    )
+    # Use hybrid search with path matching
+    current_dir = str(path) if path else str(Path.cwd())
+    results = engine.search(query, current_dir=current_dir, n_results=n_results)
     
     if not results:
         console.print("[yellow]No results found.[/yellow]")
         return
     
     if json_output:
-        import json
-        output = [
-            {
-                "session_id": r.session_id,
-                "score": r.score,
-                "content": r.content[:500],
-                "metadata": r.metadata
-            }
-            for r in results
-        ]
+        output = [r.to_dict() for r in results]
         console.print(json.dumps(output, indent=2, default=str))
     else:
-        # Display results
-        console.print(f"[dim]Found {len(results)} results[/dim]\n")
+        # Display results with breakdown
+        console.print(f"[dim]Found {len(results)} results (using hybrid search)[/dim]\n")
         
         for i, r in enumerate(results, 1):
             score_pct = f"{r.score:.1%}"
+            breakdown = r.breakdown
+            
+            # Build breakdown string
+            breakdown_str = " | ".join([
+                f"sem:{breakdown.get('semantic', 0):.2f}",
+                f"bm25:{breakdown.get('bm25', 0):.2f}",
+                f"rec:{breakdown.get('recency', 0):.2f}",
+                f"path:{breakdown.get('path', 0):.2f}"
+            ])
             
             # Get technologies if available
             techs = r.metadata.get("technologies", [])
-            tech_str = f" [dim]({', '.join(techs[:3])})[/dim]" if techs else ""
+            tech_str = f"\n[dim]Tech: {', '.join(techs[:3])}[/dim]" if techs else ""
             
             # Get files in context
             files = r.metadata.get("files_in_context", [])
             files_str = "\n".join([f"  [dim]• {f}[/dim]" for f in files[:3]]) if files else ""
             
-            # Content preview
-            preview = r.content[:200] + "..." if len(r.content) > 200 else r.content
-            preview = preview.replace("\n", " ")
+            # Get last active
+            last_active = r.metadata.get("last_active", "Unknown")
+            if last_active and last_active != "Unknown":
+                try:
+                    dt = datetime.fromisoformat(last_active)
+                    last_active = dt.strftime("%Y-%m-%d")
+                except:
+                    pass
             
-            panel_content = f"[bold]Score:[/bold] {score_pct}{tech_str}\n\n"
-            panel_content += f"[dim]{preview}[/dim]\n"
+            panel_content = f"[bold]Score:[/bold] {score_pct}\n"
+            panel_content += f"[dim]{breakdown_str}[/dim]{tech_str}\n"
+            panel_content += f"[dim]Last active: {last_active}[/dim]\n"
             if files_str:
                 panel_content += f"\n[bold]Files:[/bold]\n{files_str}"
+            
+            border = "green" if r.score > 0.7 else "yellow" if r.score > 0.4 else "red"
             
             console.print(Panel(
                 panel_content,
                 title=f"[{i}] Session {r.session_id[:16]}...",
-                border_style="green" if r.score > 0.7 else "yellow"
+                border_style=border
             ))
 
 
@@ -199,12 +211,15 @@ def search(
 def detect_fork(
     query: str = typer.Argument(..., help="Describe what you're working on"),
     n_results: int = typer.Option(5, "--results", "-n", help="Number of suggestions"),
+    path: Optional[Path] = typer.Option(None, "--path", "-p", help="Current working directory for path matching"),
+    days: int = typer.Option(90, "--days", "-d", help="Limit to sessions from last N days"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
 ):
     """Find relevant past sessions to fork context from."""
     config = get_config()
     
     db = ChromaDatabase(config.chroma_db_path)
-    engine = SemanticSearchEngine(db)
+    engine = HybridSearchEngine(db)
     
     if db.get_session_count() == 0:
         console.print("[yellow]No sessions indexed. Run 'smartfork index' first.[/yellow]")
@@ -215,35 +230,121 @@ def detect_fork(
         title="SmartFork Detect-Fork"
     ))
     
-    results = engine.search(query, n_results=n_results)
+    # Use hybrid search
+    current_dir = str(path) if path else str(Path.cwd())
+    results = engine.search(query, current_dir=current_dir, n_results=n_results * 2)
+    
+    # Filter by recency if specified
+    if days < 90:
+        cutoff = datetime.now() - timedelta(days=days)
+        filtered = []
+        for r in results:
+            last_active = r.metadata.get("last_active")
+            if last_active:
+                try:
+                    dt = datetime.fromisoformat(last_active)
+                    if dt > cutoff:
+                        filtered.append(r)
+                except:
+                    filtered.append(r)
+            else:
+                filtered.append(r)
+        results = filtered
     
     if not results:
         console.print("[yellow]No relevant sessions found.[/yellow]")
         return
     
-    console.print(f"\n[dim]Found {len(results)} relevant session(s):[/dim]\n")
+    # Limit results
+    results = results[:n_results]
     
-    for i, r in enumerate(results, 1):
-        score_pct = f"{r.score:.1%}"
+    if json_output:
+        output = [r.to_dict() for r in results]
+        console.print(json.dumps(output, indent=2, default=str))
+    else:
+        console.print(f"\n[dim]Found {len(results)} relevant session(s):[/dim]\n")
         
-        # Get technologies
-        techs = r.metadata.get("technologies", [])
-        tech_str = f"\n[dim]Tech:[/dim] {', '.join(techs[:5])}" if techs else ""
+        for i, r in enumerate(results, 1):
+            score_pct = f"{r.score:.1%}"
+            breakdown = r.breakdown
+            
+            # Get technologies
+            techs = r.metadata.get("technologies", [])
+            tech_str = f"\n[dim]Tech:[/dim] {', '.join(techs[:5])}" if techs else ""
+            
+            # Get files
+            files = r.metadata.get("files_in_context", [])
+            files_preview = f"\n[dim]Files:[/dim] {', '.join(files[:3])}..." if len(files) > 3 else f"\n[dim]Files:[/dim] {', '.join(files)}" if files else ""
+            
+            # Last active
+            last_active = r.metadata.get("last_active", "Unknown")
+            if last_active and last_active != "Unknown":
+                try:
+                    dt = datetime.fromisoformat(last_active)
+                    last_active = dt.strftime("%Y-%m-%d")
+                except:
+                    pass
+            
+            match_reasons = []
+            if breakdown.get('semantic', 0) > 0.5:
+                match_reasons.append("semantic")
+            if breakdown.get('bm25', 0) > 0.5:
+                match_reasons.append("keyword")
+            if breakdown.get('recency', 0) > 0.8:
+                match_reasons.append("recent")
+            if breakdown.get('path', 0) > 0.3:
+                match_reasons.append("same project")
+            
+            match_str = f" ({', '.join(match_reasons)})" if match_reasons else ""
+            
+            console.print(Panel(
+                f"[bold green]{score_pct}[/bold green] relevance{match_str}{tech_str}{files_preview}\n\n"
+                f"[dim]Last active: {last_active}[/dim]",
+                title=f"[{i}] {r.session_id[:20]}..."
+            ))
         
-        # Get files
-        files = r.metadata.get("files_in_context", [])
-        files_preview = f"\n[dim]Files:[/dim] {', '.join(files[:3])}..." if len(files) > 3 else f"\n[dim]Files:[/dim] {', '.join(files)}" if files else ""
-        
-        content_preview = r.content[:150] + "..." if len(r.content) > 150 else r.content
-        content_preview = content_preview.replace("\n", " ")
-        
-        console.print(Panel(
-            f"[bold green]{score_pct}[/bold green] relevance{tech_str}{files_preview}\n\n"
-            f"[dim]{content_preview}[/dim]",
-            title=f"[{i}] {r.session_id[:20]}..."
-        ))
+        console.print("\n[dim]Use [bold]smartfork fork <session_id>[/bold] to generate context file[/dim]")
+
+
+@app.command()
+def fork(
+    session_id: str = typer.Argument(..., help="Session ID to fork context from"),
+    query: str = typer.Option("", "--query", "-q", help="Original search query for context"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file path"),
+    path: Optional[Path] = typer.Option(None, "--path", "-p", help="Current working directory"),
+):
+    """Generate a fork.md context file from a session."""
+    config = get_config()
     
-    console.print("\n[dim]Use [bold]smartfork fork <session_id>[/bold] to generate context file[/dim]")
+    db = ChromaDatabase(config.chroma_db_path)
+    
+    if db.get_session_count() == 0:
+        console.print("[yellow]No sessions indexed. Run 'smartfork index' first.[/yellow]")
+        raise typer.Exit(1)
+    
+    # Check if session exists
+    chunks = db.get_session_chunks(session_id)
+    if not chunks:
+        console.print(f"[red]Session not found: {session_id}[/red]")
+        raise typer.Exit(1)
+    
+    console.print(f"[bold]Generating fork.md for session:[/bold] {session_id[:20]}...")
+    
+    # Generate fork.md
+    generator = ForkMDGenerator(db)
+    current_dir = str(path) if path else str(Path.cwd())
+    
+    content = generator.generate(session_id, query or "forked session", current_dir)
+    
+    # Save to file
+    if not output:
+        short_id = session_id[:8]
+        output = Path(f"fork_{short_id}.md")
+    
+    output.write_text(content, encoding="utf-8")
+    
+    console.print(f"[green]OK Fork.md saved to:[/green] {output.absolute()}")
+    console.print(f"\n[dim]Preview:[/dim]\n{content[:500]}...")
 
 
 @app.command()
@@ -355,6 +456,447 @@ def watch():
         console.print("[green]Watcher stopped.[/green]")
 
 
+# Phase 2: Intelligence Layer Commands
+
+@app.command()
+def compaction_check(
+    threshold_messages: int = typer.Option(100, "--messages", "-m", help="Message count threshold"),
+    threshold_days: int = typer.Option(7, "--days", "-d", help="Age threshold in days"),
+):
+    """Check for sessions at risk of compaction."""
+    from .intelligence.pre_compaction import PreCompactionHook
+    
+    config = get_config()
+    hook = PreCompactionHook(threshold_messages, threshold_days)
+    
+    with console.status("[bold]Checking sessions..."):
+        at_risk = hook.check_sessions(config.kilo_code_tasks_path)
+    
+    if not at_risk:
+        console.print("[green]No sessions at risk of compaction.[/green]")
+        return
+    
+    console.print(Panel.fit(
+        f"[bold yellow]{len(at_risk)} sessions at risk[/bold yellow]",
+        title="Compaction Check"
+    ))
+    
+    table = Table(show_header=True)
+    table.add_column("Session", style="cyan")
+    table.add_column("Messages", style="yellow", justify="right")
+    table.add_column("Age (days)", style="blue", justify="right")
+    table.add_column("Risk", style="red")
+    
+    for session in at_risk[:20]:  # Show top 20
+        table.add_row(
+            session["session_id"][:20],
+            str(session["message_count"]),
+            str(session["age_days"]),
+            session["risk_level"]
+        )
+    
+    console.print(table)
+    
+    if len(at_risk) > 20:
+        console.print(f"\n[dim]... and {len(at_risk) - 20} more[/dim]")
+
+
+@app.command()
+def compaction_export(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be exported"),
+    auto: bool = typer.Option(False, "--auto", "-a", help="Export all at-risk sessions"),
+):
+    """Export sessions before compaction."""
+    from .intelligence.pre_compaction import CompactionManager
+    
+    manager = CompactionManager()
+    
+    with console.status("[bold]Running compaction export..."):
+        results = manager.run_auto_export(dry_run=dry_run)
+    
+    if dry_run:
+        console.print(Panel.fit(
+            f"[bold]{results['at_risk']} sessions would be exported[/bold]",
+            title="Dry Run"
+        ))
+    else:
+        console.print(Panel.fit(
+            f"[bold green]Exported {results['exported']} sessions[/bold green]\n"
+            f"Failed: {results['failed']}",
+            title="Compaction Export"
+        ))
+    
+    if results['sessions']:
+        table = Table(show_header=True)
+        table.add_column("Session", style="cyan")
+        table.add_column("Action", style="green")
+        
+        for session in results['sessions'][:10]:
+            table.add_row(
+                session["session_id"][:20],
+                session["action"]
+            )
+        
+        console.print(table)
+
+
+@app.command()
+def cluster_analysis():
+    """Analyze session clusters and find duplicates."""
+    from .intelligence.clustering import SessionClusterer
+    
+    clusterer = SessionClusterer()
+    
+    with console.status("[bold]Analyzing clusters..."):
+        analysis = clusterer.analyze_clusters()
+    
+    console.print(Panel.fit(
+        f"[bold]{analysis['total_clusters']} clusters found[/bold]\n"
+        f"{analysis['noise_sessions']} unclustered sessions\n"
+        f"{analysis['potential_duplicates']} potential duplicates",
+        title="Cluster Analysis"
+    ))
+    
+    if analysis['clusters']:
+        table = Table(show_header=True)
+        table.add_column("Cluster", style="cyan", justify="right")
+        table.add_column("Sessions", style="green", justify="right")
+        table.add_column("Technologies", style="blue")
+        
+        for cluster in analysis['clusters'][:10]:
+            techs = ", ".join(cluster['common_technologies'][:5])
+            table.add_row(
+                str(cluster['cluster_id']),
+                str(cluster['session_count']),
+                techs
+            )
+        
+        console.print("\n[bold]Top Clusters:[/bold]")
+        console.print(table)
+    
+    if analysis['duplicate_pairs']:
+        console.print("\n[bold yellow]Potential Duplicates:[/bold yellow]")
+        for a, b, sim in analysis['duplicate_pairs'][:5]:
+            console.print(f"  • {a[:16]}... ↔ {b[:16]}... ({sim:.1%})")
+
+
+@app.command()
+def tree_build():
+    """Build conversation branching tree."""
+    from .intelligence.branching import BranchingTree
+    
+    config = get_config()
+    tree = BranchingTree()
+    
+    with console.status("[bold]Building tree..."):
+        tree.auto_build_tree(config.kilo_code_tasks_path)
+    
+    stats = tree.get_stats()
+    
+    console.print(Panel.fit(
+        f"[bold]{stats['total_sessions']} sessions[/bold] in tree\n"
+        f"{stats['root_sessions']} roots, {stats['leaf_sessions']} leaves\n"
+        f"Max depth: {stats['max_depth']}",
+        title="Tree Built"
+    ))
+
+
+@app.command()
+def tree_visualize(
+    session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Root session to visualize"),
+    expanded: bool = typer.Option(False, "--expanded", "-e", help="Show expanded view with more details"),
+):
+    """Visualize conversation branching tree."""
+    from .intelligence.branching import BranchingTree
+    
+    tree = BranchingTree()
+    stats = tree.get_stats()
+    
+    # Use compact mode by default for better CLI readability
+    tree_text = tree.visualize_tree(session_id, compact=not expanded)
+    
+    console.print(Panel.fit(
+        tree_text,
+        title=f"Conversation Tree ({stats['total_sessions']} sessions, {stats['root_sessions']} roots)"
+    ))
+    
+    console.print(f"\n[dim]Stats: {stats['leaf_sessions']} leaves, max depth {stats['max_depth']}[/dim]")
+    console.print("[dim]Tip: Use --expanded for more details, or 'smartfork tree-export' for interactive HTML[/dim]")
+
+
+@app.command()
+def tree_export(
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output HTML file path"),
+    open_browser: bool = typer.Option(False, "--open", "-b", help="Open in browser after export"),
+):
+    """Export conversation tree as interactive HTML."""
+    from .intelligence.branching import BranchingTree
+    
+    tree = BranchingTree()
+    
+    with console.status("[bold]Generating HTML visualization..."):
+        html_path = tree.export_html(output)
+    
+    console.print(f"[green]OK Tree exported to:[/green] {html_path}")
+    
+    stats = tree.get_stats()
+    console.print(Panel.fit(
+        f"[bold]{stats['total_sessions']}[/bold] sessions\n"
+        f"[bold]{stats['root_sessions']}[/bold] root sessions\n"
+        f"[bold]{stats['leaf_sessions']}[/bold] leaf sessions\n"
+        f"Max depth: [bold]{stats['max_depth']}[/bold]",
+        title="Tree Statistics"
+    ))
+    
+    if open_browser:
+        import webbrowser
+        webbrowser.open(f"file://{html_path.absolute()}")
+        console.print("[dim]Opened in browser[/dim]")
+
+
+@app.command()
+def vault_add(
+    session_id: str = typer.Argument(..., help="Session ID to add to vault"),
+    password: Optional[str] = typer.Option(None, "--password", "-p", help="Encryption password"),
+):
+    """Add a session to the privacy vault."""
+    from .intelligence.privacy import PrivacyVault
+    
+    config = get_config()
+    
+    if not password:
+        password = typer.prompt("Enter vault password", hide_input=True)
+    
+    vault = PrivacyVault(password)
+    
+    # Find session directory
+    task_dir = config.kilo_code_tasks_path / session_id
+    if not task_dir.exists():
+        console.print(f"[red]Session not found: {session_id}[/red]")
+        raise typer.Exit(1)
+    
+    with console.status("[bold]Adding to vault..."):
+        success = vault.add_to_vault(session_id, task_dir)
+    
+    if success:
+        console.print(f"[green]OK Session {session_id[:16]}... added to vault[/green]")
+    else:
+        console.print("[red]Failed to add to vault[/red]")
+
+
+@app.command()
+def vault_list():
+    """List vaulted sessions."""
+    from .intelligence.privacy import PrivacyVault
+    
+    vault = PrivacyVault()
+    sessions = vault.list_vaulted_sessions()
+    
+    if not sessions:
+        console.print("[dim]No sessions in vault[/dim]")
+        return
+    
+    console.print(Panel.fit(
+        f"[bold]{len(sessions)} vaulted sessions[/bold]",
+        title="Privacy Vault"
+    ))
+    
+    table = Table(show_header=True)
+    table.add_column("Session", style="cyan")
+    table.add_column("Vaulted At", style="green")
+    table.add_column("Files", style="blue", justify="right")
+    
+    for session in sessions:
+        table.add_row(
+            session["session_id"][:20],
+            session.get("vaulted_at", "unknown"),
+            str(session.get("file_count", 0))
+        )
+    
+    console.print(table)
+
+
+@app.command()
+def vault_restore(
+    session_id: str = typer.Argument(..., help="Session ID to restore"),
+    password: Optional[str] = typer.Option(None, "--password", "-p", help="Decryption password"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output directory"),
+):
+    """Restore a session from the vault."""
+    from .intelligence.privacy import PrivacyVault
+    
+    if not password:
+        password = typer.prompt("Enter vault password", hide_input=True)
+    
+    vault = PrivacyVault(password)
+    
+    with console.status("[bold]Restoring from vault..."):
+        result = vault.restore_from_vault(session_id, output)
+    
+    if result:
+        console.print(f"[green]OK Session restored to: {result}[/green]")
+    else:
+        console.print("[red]Failed to restore session[/red]")
+
+
+@app.command()
+def vault_search(
+    query: str = typer.Argument(..., help="Search query"),
+    password: Optional[str] = typer.Option(None, "--password", "-p", help="Decryption password"),
+):
+    """Search within vaulted sessions."""
+    from .intelligence.privacy import PrivacyVault
+    
+    if not password:
+        password = typer.prompt("Enter vault password", hide_input=True)
+    
+    vault = PrivacyVault(password)
+    
+    with console.status("[bold]Searching vault..."):
+        results = vault.search_vault(query)
+    
+    console.print(Panel.fit(
+        f"[bold]{len(results)} results[/bold]",
+        title="Vault Search"
+    ))
+    
+    for r in results[:10]:
+        console.print(Panel(
+            f"[dim]{r['preview']}[/dim]",
+            title=f"{r['session_id'][:16]}... / {r['file']}"
+        ))
+
+
+# Phase 3: Testing and Metrics Commands
+
+@app.command()
+def test(
+    suite: Optional[str] = typer.Option(None, "--suite", "-s", help="Test suite to run (indexer, search, database, fork)"),
+):
+    """Run SmartFork tests."""
+    from .testing.test_runner import create_default_test_runner
+    
+    runner = create_default_test_runner()
+    
+    if suite:
+        with console.status(f"[bold]Running {suite} tests..."):
+            result = runner.run_suite(suite)
+        suites = [result]
+    else:
+        with console.status("[bold]Running all tests..."):
+            suites = runner.run_all()
+    
+    # Display results
+    for suite in suites:
+        color = "green" if suite.failed_count == 0 else "red"
+        console.print(Panel.fit(
+            f"[bold {color}]{suite.passed_count}/{len(suite.tests)} passed[/bold {color}]\n"
+            f"Duration: {suite.total_duration_ms:.0f}ms",
+            title=f"Test Suite: {suite.name}"
+        ))
+        
+        if suite.failed_count > 0:
+            table = Table(show_header=True)
+            table.add_column("Test", style="cyan")
+            table.add_column("Status", style="red")
+            table.add_column("Error", style="dim")
+            
+            for test in suite.tests:
+                if not test.passed:
+                    table.add_row(
+                        test.name,
+                        "FAILED",
+                        test.error_message[:50] + "..." if test.error_message and len(test.error_message) > 50 else (test.error_message or "")
+                    )
+            
+            console.print(table)
+    
+    summary = runner.get_summary()
+    console.print(f"\n[dim]Total: {summary['passed']}/{summary['total_tests']} passed "
+                  f"({summary['pass_rate']:.1%})[/dim]")
+
+
+@app.command()
+def metrics(
+    days: int = typer.Option(7, "--days", "-d", help="Number of days to show"),
+):
+    """Show success metrics dashboard."""
+    from .testing.metrics_tracker import MetricsTracker
+    
+    tracker = MetricsTracker()
+    data = tracker.get_dashboard_data(days)
+    
+    console.print(Panel.fit(
+        f"[bold]Success Metrics[/bold] (last {data['period_days']} days)",
+        title="Metrics Dashboard"
+    ))
+    
+    # Key metrics
+    table = Table(show_header=True)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green")
+    
+    km = data['key_metrics']
+    table.add_row("Unique Sessions", str(data['unique_sessions']))
+    table.add_row("Avg Fork Gen Time", f"{km['avg_fork_generation_time_ms']:.0f}ms")
+    table.add_row("Context Recovered", f"{km['total_context_recovered_mb']:.1f}MB")
+    table.add_row("Sessions/Day", f"{km['sessions_per_day']:.1f}")
+    
+    console.print(table)
+    
+    # Metric summaries
+    if data['metric_summaries']:
+        console.print("\n[bold]Metric Trends:[/bold]")
+        for name, summary in data['metric_summaries'].items():
+            trend_color = {
+                'improving': 'green',
+                'stable': 'yellow',
+                'degrading': 'red',
+                'insufficient_data': 'dim'
+            }.get(summary['trend'], 'white')
+            
+            console.print(f"  {name}: {summary['mean']:.2f} "
+                          f"([{trend_color}]{summary['trend']}[/{trend_color}])")
+
+
+@app.command()
+def ab_test_status():
+    """Show A/B test status."""
+    from .testing.ab_testing import ABTestManager
+    
+    manager = ABTestManager()
+    summary = manager.get_test_summary()
+    
+    console.print(Panel.fit(
+        f"[bold]{summary['total_tests']}[/bold] active tests\n"
+        f"[bold]{summary['total_sessions']}[/bold] test sessions",
+        title="A/B Testing"
+    ))
+    
+    if summary['active_tests']:
+        table = Table(show_header=True)
+        table.add_column("Test", style="cyan")
+        table.add_column("Sessions", style="green", justify="right")
+        table.add_column("Control", style="blue", justify="right")
+        table.add_column("Treatment", style="yellow", justify="right")
+        table.add_column("Result", style="magenta")
+        
+        for test in summary['active_tests']:
+            result_str = "No data"
+            if test['result']:
+                sig = "sig" if test['result']['significant'] else "not sig"
+                result_str = f"{test['result']['improvement_pct']:+.1f}% ({sig})"
+            
+            table.add_row(
+                test['name'],
+                str(test['total_sessions']),
+                str(test['control']),
+                str(test['treatment']),
+                result_str
+            )
+        
+        console.print(table)
+
+
 if __name__ == "__main__":
     app()
-

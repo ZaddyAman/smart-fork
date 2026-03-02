@@ -11,6 +11,17 @@ rich>=13.7.0
 # File watching
 watchdog>=3.0.0
 
+# Search and NLP
+rank-bm25>=0.2.2
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
+# Clustering (optional - for deduplication)
+hdbscan>=0.8.33
+
+# Encryption (for privacy vault)
+cryptography>=41.0.0
+
 # Utilities
 loguru>=0.7.0
 python-dotenv>=1.0.0
