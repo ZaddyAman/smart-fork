@@ -77,6 +77,7 @@ class ChunkMetadata(BaseModel):
     message_type: str = "mixed"  # "user", "assistant", "tool", "mixed"
     technologies: List[str] = []
     last_active: Optional[str] = None  # ISO timestamp for recency scoring
+    session_title: Optional[str] = None  # Human-readable session title
 
 
 class Chunk(BaseModel):

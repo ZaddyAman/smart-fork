@@ -8,6 +8,7 @@ from loguru import logger
 from ..database.chroma_db import ChromaDatabase
 from ..database.models import TaskSession, Chunk, ChunkMetadata, IndexingResult
 from .parser import KiloCodeParser
+from ..intelligence.titling import TitleGenerator, TitleManager
 
 
 class FullIndexer:
@@ -17,7 +18,8 @@ class FullIndexer:
         self,
         db: ChromaDatabase,
         chunk_size: int = 512,
-        chunk_overlap: int = 128
+        chunk_overlap: int = 128,
+        generate_titles: bool = True
     ):
         """Initialize the indexer.
         
@@ -25,11 +27,14 @@ class FullIndexer:
             db: ChromaDatabase instance
             chunk_size: Size of chunks in tokens/words
             chunk_overlap: Overlap between chunks
+            generate_titles: Whether to auto-generate session titles
         """
         self.db = db
         self.parser = KiloCodeParser()
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.generate_titles = generate_titles
+        self.title_manager = TitleManager(db) if generate_titles else None
     
     def index_all_sessions(self, tasks_path: Path, progress: bool = True) -> IndexingResult:
         """Index all sessions in the tasks directory.
@@ -129,6 +134,11 @@ class FullIndexer:
             from datetime import datetime
             last_active = datetime.fromtimestamp(last_timestamp / 1000).isoformat()
         
+        # Generate session title if enabled
+        session_title = None
+        if self.title_manager:
+            session_title = self.title_manager.generate_and_store_title(session)
+        
         for idx, text in enumerate(text_chunks):
             chunk_id = f"{session.task_id}_{idx}"
             chunks.append(Chunk(
@@ -141,7 +151,8 @@ class FullIndexer:
                     files_in_context=session.metadata.files_in_context,
                     message_type="mixed",
                     technologies=technologies,
-                    last_active=last_active
+                    last_active=last_active,
+                    session_title=session_title
                 )
             ))
         

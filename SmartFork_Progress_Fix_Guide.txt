@@ -1,0 +1,654 @@
+═══════════════════════════════════════════════════════════════════
+  SMARTFORK — PROGRESS BAR CODE ANALYSIS & COMPLETE FIX GUIDE
+  Current Code vs. Goal State | March 2026
+═══════════════════════════════════════════════════════════════════
+
+VERDICT UPFRONT
+───────────────
+Your current progress.py and cli.py DO NOT match the goal.
+The animated dotted bar system we designed is completely absent.
+What you have now is a basic ASCII bar from 2008 dressed up with
+Rich wrappers. This guide tells you exactly what is wrong in each
+file and exactly how to fix every single piece.
+
+
+════════════════════════════════════════════════════════════════════
+PART 1 — progress.py ANALYSIS
+════════════════════════════════════════════════════════════════════
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROBLEM 1 — WRONG PROGRESS BAR CHARACTER (CRITICAL)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LINE IN YOUR CODE (progress.py ~line 54):
+  def _render_progress_bar(self, percent: float, width: int = 40) -> str:
+      filled = int((percent / 100.0) * width)
+      ...
+      bar += "=" * filled
+      ...
+      bar += "-" * (width - filled - 1)
+      return f"{bar} {percent:5.1f}%"
+
+WHAT IT PRODUCES:
+  [=====>---------------------------------]  12.5%
+  [===========>---------------------------]  37.5%
+
+WHAT THE GOAL REQUIRES:
+  ● ● ● ● ● ● ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○   30%
+
+THE FIX — Replace _render_progress_bar entirely:
+
+  DOTS_FILLED = "●"
+  DOTS_EMPTY  = "○"
+  DOT_COUNT   = 22
+
+  def make_dot_bar(self, progress: float, frame: int,
+                   color_filled: str, color_empty: str,
+                   offset: int = 0, n: int = DOT_COUNT) -> Text:
+      filled = int(progress * n)
+      text = Text()
+
+      for i in range(n):
+          if i < filled:
+              # Wave brightness ripples through filled dots
+              wave = ((frame // 3 + i + offset) % n) / n
+              brightness = 0.55 + abs(math.sin(wave * math.pi)) * 0.45
+              style = f"bold {color_filled}" if brightness > 0.75 else f"dim {color_filled}"
+              text.append(DOTS_FILLED + " ", style=style)
+
+          elif i == filled and progress < 1.0:
+              # Frontier dot pulses between filled and empty
+              pulse = (frame // 3) % 2 == 0
+              style = f"bold {color_filled}" if pulse else f"dim {color_empty}"
+              text.append(DOTS_FILLED + " ", style=style)
+
+          else:
+              text.append(DOTS_EMPTY + " ", style=f"dim {color_empty}")
+
+      return text
+
+  NOTE: This returns a Rich Text object, not a string.
+  You will need "import math" at the top of the file.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROBLEM 2 — WRONG SPINNER (COSMETIC BUT IMPORTANT)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LINE IN YOUR CODE (~line 38):
+  self._spinner_chars = ["|", "/", "-", "\\"]
+
+WHAT IT PRODUCES:
+  | Indexing Sessions
+  / Indexing Sessions
+  - Indexing Sessions
+  \ Indexing Sessions
+
+This is the oldest spinner known to man. It looks terrible.
+
+THE FIX:
+  SPINNER_FRAMES = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+
+  This is a braille-dot spinner. It's smooth, visually lightweight,
+  and looks modern. Works on Windows (UTF-8 console), macOS, Linux.
+
+  def _get_spinner(self) -> str:
+      char = SPINNER_FRAMES[self._spinner_idx % len(SPINNER_FRAMES)]
+      self._spinner_idx += 1
+      return char
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROBLEM 3 — ONLY ONE BAR INSTEAD OF THREE (CRITICAL)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+YOUR CURRENT RENDER (render_frame ~line 88):
+  lines.append(f"{spinner} Indexing Sessions")
+  lines.append(bar)                           <- only 1 bar
+  lines.append(f"Processing: {session_info}")
+  lines.append(f"Sessions: {self.stats.sessions_processed}/{total}")
+  lines.append(f"Speed: {speed:.1f} sess/s | ETA: {eta}")
+
+This produces ONE progress bar. The goal requires THREE independent
+bars, each with a different color and different animation offset:
+
+  Bar 1 — Sessions overall      (purple  #7C3AED)  <- overall progress
+  Bar 2 — Current phase         (cyan    #06B6D4)  <- Parsing / Embedding
+  Bar 3 — BM25 keyword index    (green   #10B981)  <- builds across all sessions
+
+THE FIX — You need three new state fields in IndexingStats:
+
+  @dataclass
+  class IndexingStats:
+      ...
+      phase_label: str = "Parsing"          <- ADD THIS
+      phase_progress: float = 0.0           <- ADD THIS
+      bm25_progress: float = 0.0            <- ADD THIS
+      ...
+
+  And in render_frame(), build a Table with three rows:
+
+  def _render_frame(self) -> Panel:
+      bar_table = Table.grid(expand=True, padding=(0,0))
+      bar_table.add_column(width=14)   # label
+      bar_table.add_column(ratio=1)    # dots
+      bar_table.add_column(width=6)    # percent
+
+      # Row 1 — Sessions
+      bar_table.add_row(
+          Text("  Sessions  ", style=f"dim {COLORS['bright']}"),
+          self.make_dot_bar(overall, self._frame, COLORS['primary'], COLORS['dim'], offset=0),
+          Text(f"  {int(overall*100)}%", style=f"bold {COLORS['primary']}")
+      )
+
+      bar_table.add_row(Text(""), Text(""), Text(""))  # spacer
+
+      # Row 2 — Current phase
+      bar_table.add_row(
+          Text(f"  {self.stats.phase_label:<10}", style=f"dim {COLORS['bright']}"),
+          self.make_dot_bar(self.stats.phase_progress, self._frame,
+                            COLORS['secondary'], COLORS['dim'], offset=7),
+          Text(f"  {int(self.stats.phase_progress*100)}%",
+               style=f"bold {COLORS['secondary']}")
+      )
+
+      bar_table.add_row(Text(""), Text(""), Text(""))  # spacer
+
+      # Row 3 — BM25
+      bar_table.add_row(
+          Text("  BM25 Index", style=f"dim {COLORS['bright']}"),
+          self.make_dot_bar(self.stats.bm25_progress, self._frame,
+                            COLORS['accent'], COLORS['dim'], offset=14),
+          Text(f"  {int(self.stats.bm25_progress*100)}%",
+               style=f"bold {COLORS['accent']}")
+      )
+
+      return Panel(bar_table, border_style=COLORS['primary'], box=box.ROUNDED)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROBLEM 4 — NO COLOR THEME (COSMETIC BUT CRITICAL)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Your file has zero color constants. Colors are sprinkled inline as
+strings "cyan", "green", "red" in the cli.py but not in progress.py.
+
+THE FIX — Add this block at the top of progress.py:
+
+  COLORS = {
+      "primary":   "#7C3AED",   # purple  -- sessions bar
+      "secondary": "#06B6D4",   # cyan    -- phase bar
+      "accent":    "#10B981",   # green   -- bm25 bar + done state
+      "warn":      "#F59E0B",   # amber   -- errors
+      "muted":     "#6B7280",   # gray    -- labels, secondary text
+      "bright":    "#F3F4F6",   # near-white -- primary text
+      "dim":       "#374151",   # dark gray  -- empty dots
+  }
+
+  Always reference colors by name. Never hardcode hex strings inline.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROBLEM 5 — ANIMATION IS NOT ACTUALLY ANIMATED (CRITICAL)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+YOUR CURRENT CODE (~line 107):
+  with Live(render_frame(), refresh_per_second=10) as live:
+      for session_dir in sessions_to_process:
+          ...
+          index_callback(session_dir)       <- BLOCKS HERE
+          live.update(render_frame())       <- only updates AFTER session done
+
+The Live display only refreshes when a session finishes.
+During the 0.5-2 seconds a session is being indexed, the spinner
+and progress bar are FROZEN. The wave animation only moves at
+session-completion events, not continuously.
+
+THE FIX — Run animation on a background thread:
+
+  import threading
+
+  class AnimatedProgressDisplay:
+      def __init__(self, total_sessions: int, ...):
+          ...
+          self._frame = 0
+          self._running = False
+          self._live = None
+
+      def __enter__(self):
+          self._live = Live(
+              self._render_frame(),
+              console=self.console,
+              refresh_per_second=0,    <- we control refresh manually
+              transient=False,
+          )
+          self._live.__enter__()
+          self._running = True
+          self._anim_thread = threading.Thread(
+              target=self._animation_loop, daemon=True
+          )
+          self._anim_thread.start()
+          return self
+
+      def __exit__(self, *args):
+          self._running = False
+          self._anim_thread.join(timeout=1)
+          if self._live:
+              self._live.__exit__(*args)
+
+      def _animation_loop(self):
+          FPS = 18
+          while self._running:
+              self._frame += 1
+              if self._live:
+                  self._live.update(self._render_frame())
+              time.sleep(1.0 / FPS)
+
+  This way the wave and spinner animate at 18fps REGARDLESS of
+  whether a session is currently being indexed or not.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROBLEM 6 — DISCOVERY PHASE IS A FAKE DELAY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+YOUR CURRENT CODE (~line 72):
+  with Live(refresh_per_second=10) as live:
+      for _ in range(20):   # 2 seconds of animation
+          spinner = self._get_spinner()
+          ...
+          time.sleep(0.1)
+
+You are sleeping for 2 full seconds doing NOTHING useful.
+The scan already completed BEFORE this loop runs.
+
+THE FIX — Show a real spinner DURING the actual scan:
+
+  def display_discovery_phase(self, tasks_path: Path, db_session_ids: set):
+      found = []
+      new_count = 0
+
+      with Live(refresh_per_second=15) as live:
+          frame = 0
+          for item in tasks_path.iterdir():   # the scan IS the loop
+              frame += 1
+              spin = SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]
+              t = Text()
+              t.append(f"  {spin} ", style=f"bold {COLORS['primary']}")
+              t.append("Scanning sessions... ", style=f"bold {COLORS['bright']}")
+              t.append(f"{len(found)} found", style=COLORS['muted'])
+              live.update(t)
+
+              if item.is_dir() and (item / "api_conversation_history.json").exists():
+                  found.append(item)
+                  if item.name not in db_session_ids:
+                      new_count += 1
+
+      return found, new_count
+
+  Now the spinner reflects REAL work. No fake delay. No sleeping.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROBLEM 7 — MISSING IMPORTS FOR NEW FUNCTIONALITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Your current imports in progress.py:
+  from rich.console import Console, Group
+  from rich.panel import Panel
+  from rich.table import Table
+  from rich.text import Text
+  from rich.live import Live
+
+Missing imports you MUST add:
+  from rich import box               <- for box.ROUNDED panel border
+  import math                        <- for sine wave brightness calculation
+  import threading                   <- for background animation thread
+
+
+════════════════════════════════════════════════════════════════════
+PART 2 — cli.py ANALYSIS (index command)
+════════════════════════════════════════════════════════════════════
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROBLEM 8 — INDEX COMMAND HEADER IS WRONG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+YOUR CURRENT CODE (~line 54 in cli.py):
+  console.print(Panel.fit(
+      "[bold blue]SmartFork Indexer[/bold blue]\n"
+      f"Tasks path: {config.kilo_code_tasks_path}\n"
+      f"Database: {config.chroma_db_path}",
+      title="SmartFork"
+  ))
+
+Uses generic blue. Dumps full raw paths (long, ugly).
+Does not match purple/cyan/green theme.
+
+THE FIX:
+  from rich import box
+
+  path_short = str(config.kilo_code_tasks_path)
+  if len(path_short) > 55:
+      path_short = "..." + path_short[-52:]
+
+  header = Text()
+  header.append("⚡ SmartFork ", style="bold #7C3AED")
+  header.append("Indexer\n", style="bold #F3F4F6")
+  header.append(f"  {path_short}", style="#6B7280")
+
+  console.print(Panel(header, border_style="#7C3AED", box=box.ROUNDED, padding=(0,2)))
+  console.print()
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROBLEM 9 — INDEX CALLBACK GIVES ZERO PHASE INFO TO PROGRESS BAR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+YOUR CURRENT CODE (~line 118 in cli.py):
+  def index_one(session_dir: Path):
+      chunks = indexer.index_session(session_dir)   <- black box
+      ...
+      return chunks, title
+
+  results = progress_display.display_indexing_progress(sessions_to_index, index_one)
+
+The indexer runs as a black box. The progress bar has no idea whether
+it's in Parsing or Embedding phase. Bar 2 will NEVER update because
+nothing calls set_phase().
+
+THE FIX — Stop using the callback pattern entirely:
+
+  with AnimatedProgressDisplay(total_sessions=len(sessions_to_index), console=console) as prog:
+      for i, session_dir in enumerate(sessions_to_index):
+          prog.set_session(session_dir.name)
+
+          prog.set_phase("Parsing", 0.0)
+          parsed = parser.parse_task_directory(session_dir)
+          prog.set_phase("Parsing", 1.0)
+
+          prog.set_phase("Chunking", 0.0)
+          chunks_data = chunker.chunk(parsed)
+          prog.set_phase("Chunking", 1.0)
+
+          prog.set_phase("Embedding", 0.0)
+          for j, batch in enumerate(batched(chunks_data, 16)):
+              embedder.embed_and_store(batch)
+              prog.set_phase("Embedding", (j+1) / math.ceil(len(chunks_data)/16))
+
+          prog.set_bm25((i + 1) / len(sessions_to_index))
+          prog.add_chunks(len(chunks_data))
+          prog.advance()
+
+      prog.finish()
+
+  If you cannot break indexer into phases (it's a single call):
+
+      prog.set_phase("Indexing", 0.3)
+      chunks = indexer.index_session(session_dir)
+      prog.set_phase("Indexing", 1.0)
+      prog.advance()
+
+  This is weaker but still better than never calling set_phase().
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROBLEM 10 — CALLBACK API PREVENTS PHASE UPDATES (DESIGN FLAW)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+YOUR CURRENT API:
+  progress_display.display_indexing_progress(sessions, callback)
+
+This API design means:
+  - cli.py surrenders control to progress.py
+  - cli.py CANNOT call set_phase() during indexing
+  - cli.py CANNOT update bm25_progress during indexing
+  - Bar 2 (phase) is permanently stuck at 0%
+  - Bar 3 (bm25) never updates at all
+
+THE FIX — Redesign the API:
+
+  DELETE:   display_indexing_progress(sessions, callback)   <- remove entirely
+
+  ADD context manager pattern:
+    with AnimatedProgressDisplay(total_sessions=n) as prog:
+        # cli.py now drives the display, not the other way around
+        for session in sessions:
+            prog.set_session(...)   # cli.py calls these
+            prog.set_phase(...)
+            prog.set_bm25(...)
+            prog.advance()
+        prog.finish()
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROBLEM 11 — BM25 NEVER UPDATED ANYWHERE IN cli.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Searching the entire cli.py: zero calls to anything BM25-related
+during the index command. Bar 3 will show 0% for the entire run.
+
+THE FIX — Two steps:
+
+  Step 1: Add to IndexingStats in progress.py:
+    bm25_progress: float = 0.0
+
+  Step 2: In cli.py index loop after each session:
+    prog.set_bm25((i + 1) / len(sessions_to_index))
+
+  If your BM25 has a separate build() step after all sessions:
+    # After main loop
+    for p in range(0, 101, 5):
+        prog.set_bm25(p / 100)
+        bm25_index.build_incremental()
+    prog.set_bm25(1.0)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROBLEM 12 — COMPLETION PANEL DOES NOT MATCH THEME
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+YOUR CURRENT (~line 136 in progress.py):
+  panel = Panel(
+      "\n".join(lines),
+      border_style="green",
+      title="[bold]SmartFork Index[/bold]",
+  )
+
+Generic green panel with bullet list text. No visual hierarchy.
+
+THE FIX — Replace with a 3-metric grid panel:
+
+  def display_completion_summary(self, total_db_sessions=0, elapsed=0.0):
+      grid = Table.grid(expand=True, padding=(0, 3))
+      grid.add_column(ratio=1)
+      grid.add_column(ratio=1)
+      grid.add_column(ratio=1)
+
+      def stat(value, label, color):
+          t = Text(justify="center")
+          t.append(f"{value}\n", style=f"bold {color}")
+          t.append(label, style=f"dim {COLORS['muted']}")
+          return t
+
+      grid.add_row(
+          stat(str(self.stats.sessions_processed), "sessions indexed", COLORS['primary']),
+          stat(f"{self.stats.chunks_created:,}", "chunks embedded",  COLORS['secondary']),
+          stat(f"{elapsed:.1f}s", "total time", COLORS['accent']),
+      )
+
+      panel = Panel(
+          grid,
+          title="[bold #10B981]  Index Complete[/bold #10B981]",
+          border_style=COLORS['accent'],
+          box=box.ROUNDED,
+          padding=(1, 2),
+      )
+
+      self.console.print()
+      self.console.print(panel)
+      self.console.print(
+          f"  [dim]Ready to search. Run [bold]smartfork search[/bold] to start.[/dim]\n"
+      )
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROBLEM 13 — MISSING import box IN cli.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ADD at top of cli.py:
+    from rich import box
+
+
+════════════════════════════════════════════════════════════════════
+PART 3 — FULL REWRITE ORDER (DO THESE STEPS IN SEQUENCE)
+════════════════════════════════════════════════════════════════════
+
+STEP 1  progress.py  Add: import math, import threading, from rich import box
+
+STEP 2  progress.py  Add COLORS dict at top of file (see Problem 4)
+
+STEP 3  progress.py  Add constants:
+                       SPINNER_FRAMES, DOTS_FILLED, DOTS_EMPTY, DOT_COUNT, FPS
+
+STEP 4  progress.py  Add 3 fields to IndexingStats:
+                       phase_label, phase_progress, bm25_progress
+
+STEP 5  progress.py  Delete _render_progress_bar() entirely
+
+STEP 6  progress.py  Add make_dot_bar() method (see Problem 1)
+
+STEP 7  progress.py  Rewrite _render_frame() to produce 3-bar Panel (Problem 3)
+
+STEP 8  progress.py  Add threading: __enter__, __exit__, _animation_loop (Problem 5)
+
+STEP 9  progress.py  Add mutator methods:
+                       set_session(), set_phase(), set_bm25(),
+                       advance(), add_chunks(), add_error(), finish()
+
+STEP 10 progress.py  Rewrite display_discovery_phase() (Problem 6)
+
+STEP 11 progress.py  Rewrite display_completion_summary() (Problem 12)
+
+STEP 12 progress.py  Delete display_indexing_progress(sessions, callback) entirely
+
+STEP 13 progress.py  Update __init__ to accept total_sessions: int as first arg
+
+STEP 14 cli.py       Add: from rich import box
+
+STEP 15 cli.py       Fix header panel (Problem 8)
+
+STEP 16 cli.py       Replace callback-based indexing with context manager loop
+                       (Problems 9 and 10)
+
+STEP 17 cli.py       Add set_bm25() calls in the index loop (Problem 11)
+
+STEP 18 BOTH         Test on Windows: verify Unicode dots and braille spinner render
+
+
+════════════════════════════════════════════════════════════════════
+PART 4 — WINDOWS COMPATIBILITY CHECKS
+════════════════════════════════════════════════════════════════════
+
+After rewriting, run these checks on Windows:
+
+CHECK 1 — Braille spinner
+  python -c "print('⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏')"
+  If garbled: add sys.stdout.reconfigure(encoding='utf-8') at top
+
+CHECK 2 — Dot characters
+  python -c "print('● ○')"
+  These work in Windows Terminal and PowerShell 7+.
+  Fallback if needed: "#" and "-"
+
+CHECK 3 — box.ROUNDED
+  Uses: ─ │ ╭ ╮ ╰ ╯
+  Works in Windows Terminal. Fails in legacy cmd.exe.
+  Fallback: box.ASCII
+
+
+════════════════════════════════════════════════════════════════════
+PART 5 — WHAT IS ALREADY GOOD (DO NOT CHANGE)
+════════════════════════════════════════════════════════════════════
+
+  OK  IndexingStats dataclass — solid, just needs 3 new fields
+  OK  elapsed_time, sessions_per_second, format_eta — keep exactly as-is
+  OK  Using Rich Live — correct choice
+  OK  Legacy alias IndexingProgressDisplay — keep for backward compat
+  OK  index_with_progress() helper — keep but update for new API
+  OK  All 21 CLI commands and overall cli.py structure
+  OK  console.status() for non-index commands
+  OK  JSON output flags on search/detect-fork commands
+
+
+════════════════════════════════════════════════════════════════════
+PART 6 — BEFORE AND AFTER
+════════════════════════════════════════════════════════════════════
+
+BEFORE (current output):
+
+  ┌──────────────────────────────────────────────────┐
+  │ SmartFork                                        │
+  │ SmartFork Indexer                                │
+  │ Tasks path: C:\Users\...\kilo\tasks              │
+  │ Database: data\chroma_db                         │
+  └──────────────────────────────────────────────────┘
+  / Indexing Sessions
+  [=====>----------------------------------]  14.5%
+
+  Processing: [abc123def] JWT Auth With ...
+  Sessions: 11/76 | Chunks: 1847
+  Speed: 5.2 sess/s | ETA: 01:13 | Elapsed: 14.7s
+
+
+AFTER (goal output):
+
+  (purple border)
+  ╭──────────────────────────────────────────────────────────╮
+  │  ⠹ SmartFork Indexer          11/76   1,847 chunks  62s  │
+  │                                                          │
+  │  Sessions     ● ● ● ● ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○   14%   │ (purple dots)
+  │                                                          │
+  │  Embedding    ● ● ● ● ● ● ● ● ● ● ● ○ ○ ○ ○ ○   72%   │ (cyan dots)
+  │                                                          │
+  │  BM25 Index   ● ● ● ● ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○ ○   14%   │ (green dots)
+  │                                                          │
+  │  ▸ JWT Auth with FastAPI + SQLAlchemy                    │
+  ╰──────────────────────────────────────────────────────────╯
+
+  Wave ripples backward through filled dots.
+  Frontier dot pulses at leading edge.
+  All animation runs at 18fps on background thread.
+  Spinner in header is braille ⠹ not / or |.
+
+
+════════════════════════════════════════════════════════════════════
+SUMMARY TABLE
+════════════════════════════════════════════════════════════════════
+
+  #   File          Problem                         Severity
+  --  -----------  ------------------------------  ----------
+  1   progress.py  ASCII bar, not dots             CRITICAL
+  2   progress.py  Old | / - \ spinner             HIGH
+  3   progress.py  1 bar instead of 3              CRITICAL
+  4   progress.py  No color theme                  HIGH
+  5   progress.py  Animation freezes mid-session   CRITICAL
+  6   progress.py  Fake 2-second discovery delay   HIGH
+  7   progress.py  Missing imports                 LOW
+  8   cli.py       Header wrong style              HIGH
+  9   cli.py       No phase info passed to bars    CRITICAL
+  10  cli.py       Callback API blocks phase data  CRITICAL
+  11  cli.py       BM25 bar never updated          HIGH
+  12  progress.py  Completion panel generic        HIGH
+  13  cli.py       Missing import box              LOW
+
+  CRITICAL = feature does not work as intended (5 issues)
+  HIGH     = looks bad, degrades user experience (7 issues)
+  LOW      = 1-line fixes (2 issues)
+
+
+═══════════════════════════════════════════════════════════════════
+  END OF GUIDE
+  Reference implementation: smartfork_progress.py (the goal file)
+  Apply all fixes in the Step order listed in Part 3 above.
+═══════════════════════════════════════════════════════════════════
