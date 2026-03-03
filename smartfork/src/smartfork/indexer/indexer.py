@@ -19,7 +19,8 @@ class FullIndexer:
         db: ChromaDatabase,
         chunk_size: int = 512,
         chunk_overlap: int = 128,
-        generate_titles: bool = True
+        generate_titles: bool = True,
+        batch_size: int = 100
     ):
         """Initialize the indexer.
         
@@ -28,13 +29,16 @@ class FullIndexer:
             chunk_size: Size of chunks in tokens/words
             chunk_overlap: Overlap between chunks
             generate_titles: Whether to auto-generate session titles
+            batch_size: Batch size for database operations
         """
         self.db = db
         self.parser = KiloCodeParser()
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.generate_titles = generate_titles
+        self.batch_size = batch_size
         self.title_manager = TitleManager(db) if generate_titles else None
+        self._pending_chunks: List = []  # Buffer for batching
     
     def index_all_sessions(self, tasks_path: Path, progress: bool = True) -> IndexingResult:
         """Index all sessions in the tasks directory.
@@ -64,21 +68,27 @@ class FullIndexer:
         
         for session_path in iterator:
             try:
-                chunks = self.index_session(session_path)
+                # Flush on last session
+                is_last = session_path == sessions[-1] if sessions else True
+                chunks = self.index_session(session_path, flush=is_last)
                 result.indexed += 1
                 result.chunks_created += chunks
             except Exception as e:
                 logger.error(f"Failed to index {session_path.name}: {e}")
                 result.failed += 1
         
+        # Finalize to flush any remaining chunks
+        self.finalize()
+        
         logger.info(f"Indexing complete: {result.indexed} indexed, {result.failed} failed, {result.chunks_created} chunks")
         return result
     
-    def index_session(self, session_path: Path) -> int:
-        """Index a single session.
+    def index_session(self, session_path: Path, flush: bool = False) -> int:
+        """Index a single session with optional batching.
         
         Args:
             session_path: Path to session directory
+            flush: If True, immediately flush pending chunks to DB
             
         Returns:
             Number of chunks created
@@ -100,11 +110,29 @@ class FullIndexer:
         if not chunks:
             return 0
         
-        # Store in database (without embeddings - ChromaDB will generate)
-        self.db.add_chunks(chunks)
+        # Add to pending buffer for batch processing
+        self._pending_chunks.extend(chunks)
+        
+        # Flush if buffer is full or flush requested
+        if flush or len(self._pending_chunks) >= self.batch_size:
+            self._flush_pending_chunks()
         
         logger.debug(f"Indexed {len(chunks)} chunks for session {task_id[:8]}...")
         return len(chunks)
+    
+    def _flush_pending_chunks(self) -> None:
+        """Flush pending chunks to database in batches."""
+        if not self._pending_chunks:
+            return
+        
+        # Store in database with batching
+        self.db.add_chunks(self._pending_chunks, batch_size=self.batch_size)
+        logger.debug(f"Flushed {len(self._pending_chunks)} pending chunks to database")
+        self._pending_chunks.clear()
+    
+    def finalize(self) -> None:
+        """Finalize indexing by flushing any remaining pending chunks."""
+        self._flush_pending_chunks()
     
     def _create_chunks(self, session: TaskSession) -> List[Chunk]:
         """Create chunks from session conversation.

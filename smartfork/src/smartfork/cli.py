@@ -36,6 +36,8 @@ from .indexer.parser import KiloCodeParser
 from .ui.progress import (
     SmartForkProgress, display_discovery_phase,
     display_completion_summary, THEMES, DEFAULT_THEME,
+    get_theme_colors, get_semantic_color,
+    set_animation_fps, set_adaptive_fps,
 )
 from .ui.contextual_help import ContextualHelpManager, UserAction, get_help_manager
 from .ui.interactive import start_interactive_shell
@@ -69,15 +71,50 @@ def setup_logging(log_level: str, log_file: Optional[Path] = None):
         )
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
-    log_file: Optional[Path] = typer.Option(None, "--log-file", help="Log file path")
+    log_file: Optional[Path] = typer.Option(None, "--log-file", help="Log file path"),
+    lite: bool = typer.Option(False, "--lite", "-l", help="Lite mode - minimal resource usage"),
 ):
     """SmartFork - AI Session Intelligence for Kilo Code."""
     config = get_config()
+    
+    # Apply lite mode settings if enabled
+    if lite:
+        config.lite_mode = True
+        config.disable_animations = True
+        config.animation_fps = 5
+        console.print(f"[dim]Lite mode enabled - reduced CPU/animations[/dim]")
+    
+    # Configure animation settings
+    set_animation_fps(config.get_effective_fps())
+    set_adaptive_fps(config.adaptive_fps and not config.disable_animations)
+    
     log_level = "DEBUG" if verbose else config.log_level
     setup_logging(log_level, log_file)
+    
+    # Launch interactive shell if no subcommand provided
+    if ctx.invoked_subcommand is None:
+        theme_name = getattr(config, "theme", DEFAULT_THEME)
+        theme = get_theme_colors(theme_name)
+        semantic = theme.get("semantic", {})
+        info_color = semantic.get("info", theme["text_primary"])
+        error_color = semantic.get("error", "#EF4444")
+        
+        console.print(Panel.fit(
+            f"[bold {info_color}]SmartFork Interactive Mode[/bold {info_color}]\n"
+            "Starting interactive shell...",
+            title="SmartFork",
+            border_style=theme["panel_border"]
+        ))
+        
+        try:
+            start_interactive_shell()
+        except Exception as e:
+            console.print(f"[{error_color}]Error starting interactive shell: {e}[/{error_color}]")
+            raise typer.Exit(1)
 
 
 @app.command()
@@ -140,13 +177,20 @@ def index(
         f"Indexing {len(sessions_to_index)} sessions...\n"
     )
 
-    indexer    = FullIndexer(db, chunk_size=config.chunk_size, chunk_overlap=config.chunk_overlap)
+    indexer = FullIndexer(
+        db, 
+        chunk_size=config.chunk_size, 
+        chunk_overlap=config.chunk_overlap,
+        batch_size=config.batch_size
+    )
     final_stats = None
 
     with SmartForkProgress(
         total_sessions=len(sessions_to_index),
         theme_name=theme_name,
         console=console,
+        animation_fps=config.get_effective_fps(),
+        disable_animation=config.disable_animations,
     ) as prog:
 
         for i, session_dir in enumerate(sessions_to_index):
@@ -213,12 +257,24 @@ def _start_watch_mode(config, db, console, theme):
         f"\n  [{theme['bars'][0]['color']}]◉[/{theme['bars'][0]['color']}] "
         f"Watch mode. Ctrl+C to stop.\n"
     )
+    
+    # Use longer poll interval in lite mode
+    poll_interval = 10.0 if config.lite_mode else 5.0
+    if config.lite_mode:
+        console.print(f"  [dim]Lite mode: using {poll_interval}s poll interval[/dim]\n")
+    
     incremental = IncrementalIndexer(db)
-    watcher = TranscriptWatcher(config.kilo_code_tasks_path, incremental.on_session_changed)
+    watcher = TranscriptWatcher(
+        config.kilo_code_tasks_path, 
+        incremental.on_session_changed,
+        poll_interval=poll_interval
+    )
     watcher.start()
     try:
         while True:
-            time.sleep(1)
+            # Longer sleep in lite mode to reduce CPU
+            sleep_interval = 2.0 if config.lite_mode else 1.0
+            time.sleep(sleep_interval)
     except KeyboardInterrupt:
         console.print(f"\n  [{theme['text_muted']}]Watcher stopped.[/{theme['text_muted']}]")
         watcher.stop()
@@ -233,22 +289,37 @@ def search(
 ):
     """Search indexed sessions using hybrid search (semantic + BM25 + recency + path)."""
     config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    error_color = semantic.get("error", "#EF4444")
+    accent_color = semantic.get("accent", theme["text_primary"])
     
     db = ChromaDatabase(config.chroma_db_path)
-    engine = HybridSearchEngine(db)
+    engine = HybridSearchEngine(
+        db,
+        enable_cache=config.enable_search_cache,
+        cache_size=config.search_cache_size,
+        cache_ttl=config.search_cache_ttl
+    )
     
     if db.get_session_count() == 0:
-        console.print("[yellow]No sessions indexed. Run 'smartfork index' first.[/yellow]")
+        console.print(f"[{warning_color}]No sessions indexed. Run 'smartfork index' first.[/{warning_color}]")
         raise typer.Exit(1)
     
-    console.print(f"[bold]Searching for:[/bold] {query}\n")
+    console.print(f"[bold {info_color}]Searching for:[/bold {info_color}] {query}\n")
     
     # Use hybrid search with path matching
     current_dir = str(path) if path else str(Path.cwd())
     results = engine.search(query, current_dir=current_dir, n_results=n_results)
     
     if not results:
-        console.print("[yellow]No results found.[/yellow]")
+        console.print(f"[{warning_color}]No results found.[/{warning_color}]")
         return
     
     if json_output:
@@ -256,7 +327,7 @@ def search(
         console.print(json.dumps(output, indent=2, default=str))
     else:
         # Display results with breakdown
-        console.print(f"[dim]Found {len(results)} results (using hybrid search)[/dim]\n")
+        console.print(f"[{theme['text_muted']}]Found {len(results)} results (using hybrid search)[/{theme['text_muted']}]\n")
         
         for i, r in enumerate(results, 1):
             score_pct = f"{r.score:.1%}"
@@ -272,11 +343,11 @@ def search(
             
             # Get technologies if available
             techs = r.metadata.get("technologies", [])
-            tech_str = f"\n[dim]Tech: {', '.join(techs[:3])}[/dim]" if techs else ""
+            tech_str = f"\n[{theme['text_muted']}]Tech: {', '.join(techs[:3])}[/{theme['text_muted']}]" if techs else ""
             
             # Get files in context
             files = r.metadata.get("files_in_context", [])
-            files_str = "\n".join([f"  [dim]* {f}[/dim]" for f in files[:3]]) if files else ""
+            files_str = "\n".join([f"  [{theme['text_muted']}]* {f}[/{theme['text_muted']}]" for f in files[:3]]) if files else ""
             
             # Get last active
             last_active = r.metadata.get("last_active", "Unknown")
@@ -287,13 +358,19 @@ def search(
                 except:
                     pass
             
-            panel_content = f"[bold]Score:[/bold] {score_pct}\n"
-            panel_content += f"[dim]{breakdown_str}[/dim]{tech_str}\n"
-            panel_content += f"[dim]Last active: {last_active}[/dim]\n"
-            if files_str:
-                panel_content += f"\n[bold]Files:[/bold]\n{files_str}"
+            # Theme-aware border colors based on score
+            if r.score > 0.7:
+                border = success_color
+            elif r.score > 0.4:
+                border = warning_color
+            else:
+                border = error_color
             
-            border = "green" if r.score > 0.7 else "yellow" if r.score > 0.4 else "red"
+            panel_content = f"[bold {info_color}]Score:[/bold {info_color}] {score_pct}\n"
+            panel_content += f"[{theme['text_muted']}]{breakdown_str}[/{theme['text_muted']}]{tech_str}\n"
+            panel_content += f"[{theme['text_muted']}]Last active: {last_active}[/{theme['text_muted']}]\n"
+            if files_str:
+                panel_content += f"\n[bold {info_color}]Files:[/bold {info_color}]\n{files_str}"
             
             # Get session title if available
             session_title = r.metadata.get("session_title")
@@ -327,17 +404,33 @@ def detect_fork(
 ):
     """Find relevant past sessions to fork context from."""
     config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    error_color = semantic.get("error", "#EF4444")
+    accent_color = semantic.get("accent", theme["text_primary"])
     
     db = ChromaDatabase(config.chroma_db_path)
-    engine = HybridSearchEngine(db)
+    engine = HybridSearchEngine(
+        db,
+        enable_cache=config.enable_search_cache,
+        cache_size=config.search_cache_size,
+        cache_ttl=config.search_cache_ttl
+    )
     
     if db.get_session_count() == 0:
-        console.print("[yellow]No sessions indexed. Run 'smartfork index' first.[/yellow]")
+        console.print(f"[{warning_color}]No sessions indexed. Run 'smartfork index' first.[/{warning_color}]")
         raise typer.Exit(1)
     
     console.print(Panel.fit(
-        f"[bold]Detecting fork for:[/bold] {query}",
-        title="SmartFork Detect-Fork"
+        f"[bold {info_color}]Detecting fork for:[/bold {info_color}] {query}",
+        title="SmartFork Detect-Fork",
+        border_style=theme["panel_border"]
     ))
     
     # Use hybrid search
@@ -362,7 +455,7 @@ def detect_fork(
         results = filtered
     
     if not results:
-        console.print("[yellow]No relevant sessions found.[/yellow]")
+        console.print(f"[{warning_color}]No relevant sessions found.[/{warning_color}]")
         return
     
     # Limit results
@@ -372,7 +465,7 @@ def detect_fork(
         output = [r.to_dict() for r in results]
         console.print(json.dumps(output, indent=2, default=str))
     else:
-        console.print(f"\n[dim]Found {len(results)} relevant session(s):[/dim]\n")
+        console.print(f"\n[{theme['text_muted']}]Found {len(results)} relevant session(s):[/{theme['text_muted']}]\n")
         
         for i, r in enumerate(results, 1):
             score_pct = f"{r.score:.1%}"
@@ -380,11 +473,11 @@ def detect_fork(
             
             # Get technologies
             techs = r.metadata.get("technologies", [])
-            tech_str = f"\n[dim]Tech:[/dim] {', '.join(techs[:5])}" if techs else ""
+            tech_str = f"\n[{theme['text_muted']}]Tech:[/{theme['text_muted']}] {', '.join(techs[:5])}" if techs else ""
             
             # Get files
             files = r.metadata.get("files_in_context", [])
-            files_preview = f"\n[dim]Files:[/dim] {', '.join(files[:3])}..." if len(files) > 3 else f"\n[dim]Files:[/dim] {', '.join(files)}" if files else ""
+            files_preview = f"\n[{theme['text_muted']}]Files:[/{theme['text_muted']}] {', '.join(files[:3])}..." if len(files) > 3 else f"\n[{theme['text_muted']}]Files:[/{theme['text_muted']}] {', '.join(files)}" if files else ""
             
             # Last active
             last_active = r.metadata.get("last_active", "Unknown")
@@ -415,15 +508,16 @@ def detect_fork(
                 title_text = f"[{i}] {r.session_id[:20]}..."
             
             # Also show session ID in dim text if title is shown
-            id_text = f"\n[dim]ID: {r.session_id[:20]}...[/dim]" if session_title else ""
+            id_text = f"\n[{theme['text_muted']}]ID: {r.session_id[:20]}...[/{theme['text_muted']}]" if session_title else ""
             
             console.print(Panel(
-                f"[bold green]{score_pct}[/bold green] relevance{match_str}{tech_str}{files_preview}\n\n"
-                f"[dim]Last active: {last_active}[/dim]{id_text}",
-                title=title_text
+                f"[bold {success_color}]{score_pct}[/bold {success_color}] relevance{match_str}{tech_str}{files_preview}\n\n"
+                f"[{theme['text_muted']}]Last active: {last_active}[/{theme['text_muted']}]{id_text}",
+                title=title_text,
+                border_style=theme["panel_border"]
             ))
         
-        console.print("\n[dim]Use [bold]smartfork fork <session_id>[/bold] to generate context file[/dim]")
+        console.print(f"\n[{theme['text_muted']}]Use [bold]smartfork fork <session_id>[/bold] to generate context file[/{theme['text_muted']}]")
         
         # Show contextual help
         help_manager.show_after_command(
@@ -443,26 +537,36 @@ def fork(
 ):
     """Generate a fork.md context file from a session."""
     config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    error_color = semantic.get("error", "#EF4444")
+    accent_color = semantic.get("accent", theme["text_primary"])
     
     db = ChromaDatabase(config.chroma_db_path)
     
     if db.get_session_count() == 0:
-        console.print("[yellow]No sessions indexed. Run 'smartfork index' first.[/yellow]")
+        console.print(f"[{warning_color}]No sessions indexed. Run 'smartfork index' first.[/{warning_color}]")
         raise typer.Exit(1)
     
     # Check if session exists
     chunks = db.get_session_chunks(session_id)
     if not chunks:
-        console.print(f"[red]Session not found: {session_id}[/red]")
+        console.print(f"[{error_color}]Session not found: {session_id}[/{error_color}]")
         raise typer.Exit(1)
     
     # Get session title if available
     session_title = chunks[0].metadata.session_title if chunks else None
     if session_title:
-        console.print(f"[bold]Generating fork.md for session:[/bold] {session_title}")
-        console.print(f"[dim]ID: {session_id[:20]}...[/dim]")
+        console.print(f"[bold {info_color}]Generating fork.md for session:[/bold {info_color}] {session_title}")
+        console.print(f"[{theme['text_muted']}]ID: {session_id[:20]}...[/{theme['text_muted']}]")
     else:
-        console.print(f"[bold]Generating fork.md for session:[/bold] {session_id[:20]}...")
+        console.print(f"[bold {info_color}]Generating fork.md for session:[/bold {info_color}] {session_id[:20]}...")
     
     # Generate fork.md
     generator = ForkMDGenerator(db)
@@ -477,8 +581,8 @@ def fork(
     
     output.write_text(content, encoding="utf-8")
     
-    console.print(f"[green]OK Fork.md saved to:[/green] {output.absolute()}")
-    console.print(f"\n[dim]Preview:[/dim]\n{content[:500]}...")
+    console.print(f"[{success_color}]OK Fork.md saved to:[/{success_color}] {output.absolute()}")
+    console.print(f"\n[{theme['text_muted']}]Preview:[/{theme['text_muted']}]\n{content[:500]}...")
     
     # Show contextual help
     help_manager.show_after_command(
@@ -493,6 +597,9 @@ def fork(
 def status():
     """Show indexing status."""
     config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
     
     db = ChromaDatabase(config.chroma_db_path)
     
@@ -507,15 +614,21 @@ def status():
     else:
         total_tasks = 0
     
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    
     # Display status
     console.print(Panel.fit(
-        "[bold blue]SmartFork Status[/bold blue]",
-        title="Status"
+        f"[bold {theme['text_primary']}]SmartFork Status[/bold {theme['text_primary']}]",
+        title="Status",
+        border_style=theme["panel_border"]
     ))
     
     table = Table(show_header=False)
-    table.add_column("Property", style="cyan")
-    table.add_column("Value", style="green")
+    table.add_column("Property", style=info_color)
+    table.add_column("Value", style=success_color)
     
     table.add_row("Kilo Code Tasks Path", str(config.kilo_code_tasks_path))
     table.add_row("Database Path", str(config.chroma_db_path))
@@ -527,7 +640,7 @@ def status():
     console.print(table)
     
     if unique_sessions < total_tasks:
-        console.print("\n[yellow]Tip: Run 'smartfork index' to index remaining sessions[/yellow]")
+        console.print(f"\n[{warning_color}]Tip: Run 'smartfork index' to index remaining sessions[/{warning_color}]")
     
     # Show contextual help
     help_manager.show_after_command(
@@ -538,19 +651,143 @@ def status():
     )
 
 
+@app.command("session-list")
+def session_list(
+    limit: int = typer.Option(20, "--limit", "-n", help="Maximum number of sessions to show"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """List all indexed sessions with IDs and titles."""
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    accent_color = semantic.get("accent", theme["text_primary"])
+    
+    db = ChromaDatabase(config.chroma_db_path)
+    
+    if db.get_session_count() == 0:
+        console.print(f"[{warning_color}]No sessions indexed. Run 'smartfork index' first.[/{warning_color}]")
+        raise typer.Exit(1)
+    
+    # Get all unique sessions
+    session_ids = db.get_unique_sessions()
+    
+    if not session_ids:
+        console.print(f"[{warning_color}]No sessions found in database.[/{warning_color}]")
+        raise typer.Exit(0)
+    
+    # Gather session info with titles
+    sessions_info = []
+    for session_id in session_ids:
+        try:
+            chunks = db.get_session_chunks(session_id)
+            if chunks:
+                # Get title from first chunk's metadata
+                title = chunks[0].metadata.session_title or "Untitled"
+                # Get last active timestamp
+                last_active = chunks[0].metadata.last_active or "Unknown"
+                # Count chunks for this session
+                chunk_count = len(chunks)
+                sessions_info.append({
+                    "id": session_id,
+                    "title": title,
+                    "last_active": last_active,
+                    "chunks": chunk_count
+                })
+        except Exception as e:
+            logger.warning(f"Failed to get info for session {session_id}: {e}")
+            sessions_info.append({
+                "id": session_id,
+                "title": "Error loading",
+                "last_active": "Unknown",
+                "chunks": 0
+            })
+    
+    # Sort by last active (most recent first)
+    sessions_info.sort(key=lambda x: x["last_active"] if x["last_active"] != "Unknown" else "", reverse=True)
+    
+    if json_output:
+        output = {
+            "total": len(sessions_info),
+            "sessions": sessions_info[:limit]
+        }
+        console.print(json.dumps(output, indent=2, default=str))
+        return
+    
+    # Display header
+    console.print(Panel.fit(
+        f"[bold {info_color}]{len(sessions_info)} indexed sessions[/bold {info_color}]",
+        title="Session List",
+        border_style=theme["panel_border"]
+    ))
+    
+    # Create table
+    table = Table(show_header=True)
+    table.add_column("#", style=accent_color, justify="right", width=4)
+    table.add_column("Session ID", style=info_color, width=12)
+    table.add_column("Title", style=success_color, min_width=30)
+    table.add_column("Last Active", style=theme["text_muted"], width=12)
+    table.add_column("Chunks", style=accent_color, justify="right", width=8)
+    
+    for i, session in enumerate(sessions_info[:limit], 1):
+        # Format short ID (first 8 chars)
+        short_id = session["id"][:8]
+        full_id = session["id"]
+        
+        # Create clickable text using Rich hyperlink
+        # Clicking copies the full ID (supported in modern terminals)
+        clickable_id = f"[link=copy:{full_id}]{short_id}[/link]"
+        
+        # Format last active
+        last_active = session["last_active"]
+        if last_active and last_active != "Unknown":
+            try:
+                dt = datetime.fromisoformat(last_active)
+                last_active = dt.strftime("%Y-%m-%d")
+            except:
+                pass
+        
+        table.add_row(
+            str(i),
+            clickable_id,
+            session["title"],
+            last_active,
+            str(session["chunks"])
+        )
+    
+    console.print(table)
+    
+    if len(sessions_info) > limit:
+        console.print(f"\n[{theme['text_muted']}]... and {len(sessions_info) - limit} more sessions (use --limit to show more)[/{theme['text_muted']}]")
+    
+    console.print(f"\n[{theme['text_muted']}]Tip: Click the Session ID to copy full ID, or use 'smartfork fork <number>'[/{theme['text_muted']}]")
+
+
 @app.command()
 def config_show():
     """Show current configuration."""
     config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
 
     console.print(Panel.fit(
-        "[bold blue]SmartFork Configuration[/bold blue]",
-        title="Config"
+        f"[bold {theme['text_primary']}]SmartFork Configuration[/bold {theme['text_primary']}]",
+        title="Config",
+        border_style=theme["panel_border"]
     ))
 
     table = Table(show_header=False)
-    table.add_column("Setting", style="cyan")
-    table.add_column("Value", style="green")
+    table.add_column("Setting", style=info_color)
+    table.add_column("Value", style=success_color)
 
     for key, value in config.model_dump().items():
         table.add_row(key, str(value))
@@ -612,29 +849,46 @@ def reset(
     force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation")
 ):
     """Reset the database (WARNING: deletes all indexed data)."""
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    
     if not force:
         confirm = typer.confirm("Are you sure you want to delete all indexed data?")
         if not confirm:
-            console.print("[yellow]Aborted.[/yellow]")
+            console.print(f"[{warning_color}]Aborted.[/{warning_color}]")
             raise typer.Exit(0)
     
-    config = get_config()
     db = ChromaDatabase(config.chroma_db_path)
     
     db.reset()
-    console.print("[green]Database reset complete.[/green]")
+    console.print(f"[{success_color}]Database reset complete.[/{success_color}]")
 
 
 @app.command()
 def watch():
     """Watch for session changes and index incrementally."""
     config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    error_color = semantic.get("error", "#EF4444")
     
     if not config.kilo_code_tasks_path.exists():
-        console.print(f"[red]Error: Tasks path does not exist: {config.kilo_code_tasks_path}[/red]")
+        console.print(f"[{error_color}]Error: Tasks path does not exist: {config.kilo_code_tasks_path}[/{error_color}]")
         raise typer.Exit(1)
     
-    console.print("[bold]Starting watcher... Press Ctrl+C to stop.[/bold]\n")
+    console.print(f"[bold {info_color}]Starting watcher... Press Ctrl+C to stop.[/{info_color}]\n")
     
     db = ChromaDatabase(config.chroma_db_path)
     incremental = IncrementalIndexer(db)
@@ -650,9 +904,9 @@ def watch():
             import time
             time.sleep(1)
     except KeyboardInterrupt:
-        console.print("\n[yellow]Stopping watcher...[/yellow]")
+        console.print(f"\n[{warning_color}]Stopping watcher...[/{warning_color}]")
         watcher.stop()
-        console.print("[green]Watcher stopped.[/green]")
+        console.print(f"[{success_color}]Watcher stopped.[/{success_color}]")
 
 
 # Phase 2: Intelligence Layer Commands
@@ -666,25 +920,37 @@ def compaction_check(
     from .intelligence.pre_compaction import PreCompactionHook
     
     config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    error_color = semantic.get("error", "#EF4444")
+    accent_color = semantic.get("accent", theme["text_primary"])
+    
     hook = PreCompactionHook(threshold_messages, threshold_days)
     
-    with console.status("[bold]Checking sessions..."):
+    with console.status(f"[bold {info_color}]Checking sessions..."):
         at_risk = hook.check_sessions(config.kilo_code_tasks_path)
     
     if not at_risk:
-        console.print("[green]No sessions at risk of compaction.[/green]")
+        console.print(f"[{success_color}]No sessions at risk of compaction.[/{success_color}]")
         return
     
     console.print(Panel.fit(
-        f"[bold yellow]{len(at_risk)} sessions at risk[/bold yellow]",
-        title="Compaction Check"
+        f"[bold {warning_color}]{len(at_risk)} sessions at risk[/bold {warning_color}]",
+        title="Compaction Check",
+        border_style=theme["panel_border"]
     ))
     
     table = Table(show_header=True)
-    table.add_column("Session", style="cyan")
-    table.add_column("Messages", style="yellow", justify="right")
-    table.add_column("Age (days)", style="blue", justify="right")
-    table.add_column("Risk", style="red")
+    table.add_column("Session", style=info_color)
+    table.add_column("Messages", style=warning_color, justify="right")
+    table.add_column("Age (days)", style=accent_color, justify="right")
+    table.add_column("Risk", style=error_color)
     
     for session in at_risk[:20]:  # Show top 20
         table.add_row(
@@ -697,7 +963,7 @@ def compaction_check(
     console.print(table)
     
     if len(at_risk) > 20:
-        console.print(f"\n[dim]... and {len(at_risk) - 20} more[/dim]")
+        console.print(f"\n[{theme['text_muted']}]... and {len(at_risk) - 20} more[/{theme['text_muted']}]")
 
 
 @app.command()
@@ -708,27 +974,41 @@ def compaction_export(
     """Export sessions before compaction."""
     from .intelligence.pre_compaction import CompactionManager
     
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    error_color = semantic.get("error", "#EF4444")
+    accent_color = semantic.get("accent", theme["text_primary"])
+    
     manager = CompactionManager()
     
-    with console.status("[bold]Running compaction export..."):
+    with console.status(f"[bold {info_color}]Running compaction export..."):
         results = manager.run_auto_export(dry_run=dry_run)
     
     if dry_run:
         console.print(Panel.fit(
-            f"[bold]{results['at_risk']} sessions would be exported[/bold]",
-            title="Dry Run"
+            f"[bold {info_color}]{results['at_risk']} sessions would be exported[/bold {info_color}]",
+            title="Dry Run",
+            border_style=theme["panel_border"]
         ))
     else:
         console.print(Panel.fit(
-            f"[bold green]Exported {results['exported']} sessions[/bold green]\n"
+            f"[bold {success_color}]Exported {results['exported']} sessions[/bold {success_color}]\n"
             f"Failed: {results['failed']}",
-            title="Compaction Export"
+            title="Compaction Export",
+            border_style=theme["panel_border"]
         ))
     
     if results['sessions']:
         table = Table(show_header=True)
-        table.add_column("Session", style="cyan")
-        table.add_column("Action", style="green")
+        table.add_column("Session", style=info_color)
+        table.add_column("Action", style=success_color)
         
         for session in results['sessions'][:10]:
             table.add_row(
@@ -744,23 +1024,36 @@ def cluster_analysis():
     """Analyze session clusters and find duplicates."""
     from .intelligence.clustering import SessionClusterer
     
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    error_color = semantic.get("error", "#EF4444")
+    accent_color = semantic.get("accent", theme["text_primary"])
+    
     clusterer = SessionClusterer()
     
-    with console.status("[bold]Analyzing clusters..."):
+    with console.status(f"[bold {info_color}]Analyzing clusters..."):
         analysis = clusterer.analyze_clusters()
     
     console.print(Panel.fit(
-        f"[bold]{analysis['total_clusters']} clusters found[/bold]\n"
+        f"[bold {info_color}]{analysis['total_clusters']} clusters found[/bold {info_color}]\n"
         f"{analysis['noise_sessions']} unclustered sessions\n"
         f"{analysis['potential_duplicates']} potential duplicates",
-        title="Cluster Analysis"
+        title="Cluster Analysis",
+        border_style=theme["panel_border"]
     ))
     
     if analysis['clusters']:
         table = Table(show_header=True)
-        table.add_column("Cluster", style="cyan", justify="right")
-        table.add_column("Sessions", style="green", justify="right")
-        table.add_column("Technologies", style="blue")
+        table.add_column("Cluster", style=info_color, justify="right")
+        table.add_column("Sessions", style=success_color, justify="right")
+        table.add_column("Technologies", style=accent_color)
         
         for cluster in analysis['clusters'][:10]:
             techs = ", ".join(cluster['common_technologies'][:5])
@@ -770,11 +1063,11 @@ def cluster_analysis():
                 techs
             )
         
-        console.print("\n[bold]Top Clusters:[/bold]")
+        console.print(f"\n[bold {info_color}]Top Clusters:[/bold {info_color}]")
         console.print(table)
     
     if analysis['duplicate_pairs']:
-        console.print("\n[bold yellow]Potential Duplicates:[/bold yellow]")
+        console.print(f"\n[bold {warning_color}]Potential Duplicates:[/bold {warning_color}]")
         for a, b, sim in analysis['duplicate_pairs'][:5]:
             console.print(f"  • {a[:16]}... ↔ {b[:16]}... ({sim:.1%})")
 
@@ -785,18 +1078,28 @@ def tree_build():
     from .intelligence.branching import BranchingTree
     
     config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    accent_color = semantic.get("accent", theme["text_primary"])
+    
     tree = BranchingTree()
     
-    with console.status("[bold]Building tree..."):
+    with console.status(f"[bold {info_color}]Building tree..."):
         tree.auto_build_tree(config.kilo_code_tasks_path)
     
     stats = tree.get_stats()
     
     console.print(Panel.fit(
-        f"[bold]{stats['total_sessions']} sessions[/bold] in tree\n"
+        f"[bold {info_color}]{stats['total_sessions']} sessions[/bold {info_color}] in tree\n"
         f"{stats['root_sessions']} roots, {stats['leaf_sessions']} leaves\n"
         f"Max depth: {stats['max_depth']}",
-        title="Tree Built"
+        title="Tree Built",
+        border_style=theme["panel_border"]
     ))
 
 
@@ -808,6 +1111,15 @@ def tree_visualize(
     """Visualize conversation branching tree."""
     from .intelligence.branching import BranchingTree
     
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    accent_color = semantic.get("accent", theme["text_primary"])
+    
     tree = BranchingTree()
     stats = tree.get_stats()
     
@@ -816,11 +1128,12 @@ def tree_visualize(
     
     console.print(Panel.fit(
         tree_text,
-        title=f"Conversation Tree ({stats['total_sessions']} sessions, {stats['root_sessions']} roots)"
+        title=f"Conversation Tree ({stats['total_sessions']} sessions, {stats['root_sessions']} roots)",
+        border_style=theme["panel_border"]
     ))
     
-    console.print(f"\n[dim]Stats: {stats['leaf_sessions']} leaves, max depth {stats['max_depth']}[/dim]")
-    console.print("[dim]Tip: Use --expanded for more details, or 'smartfork tree-export' for interactive HTML[/dim]")
+    console.print(f"\n[{theme['text_muted']}]Stats: {stats['leaf_sessions']} leaves, max depth {stats['max_depth']}[/{theme['text_muted']}]")
+    console.print(f"[{theme['text_muted']}]Tip: Use --expanded for more details, or 'smartfork tree-export' for interactive HTML[/{theme['text_muted']}]")
 
 
 @app.command()
@@ -831,26 +1144,37 @@ def tree_export(
     """Export conversation tree as interactive HTML."""
     from .intelligence.branching import BranchingTree
     
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    accent_color = semantic.get("accent", theme["text_primary"])
+    
     tree = BranchingTree()
     
-    with console.status("[bold]Generating HTML visualization..."):
+    with console.status(f"[bold {info_color}]Generating HTML visualization..."):
         html_path = tree.export_html(output)
     
-    console.print(f"[green]OK Tree exported to:[/green] {html_path}")
+    console.print(f"[{success_color}]OK Tree exported to:[/{success_color}] {html_path}")
     
     stats = tree.get_stats()
     console.print(Panel.fit(
-        f"[bold]{stats['total_sessions']}[/bold] sessions\n"
-        f"[bold]{stats['root_sessions']}[/bold] root sessions\n"
-        f"[bold]{stats['leaf_sessions']}[/bold] leaf sessions\n"
-        f"Max depth: [bold]{stats['max_depth']}[/bold]",
-        title="Tree Statistics"
+        f"[bold {info_color}]{stats['total_sessions']}[/bold {info_color}] sessions\n"
+        f"[bold {info_color}]{stats['root_sessions']}[/bold {info_color}] root sessions\n"
+        f"[bold {info_color}]{stats['leaf_sessions']}[/bold {info_color}] leaf sessions\n"
+        f"Max depth: [bold {info_color}]{stats['max_depth']}[/bold {info_color}]",
+        title="Tree Statistics",
+        border_style=theme["panel_border"]
     ))
     
     if open_browser:
         import webbrowser
         webbrowser.open(f"file://{html_path.absolute()}")
-        console.print("[dim]Opened in browser[/dim]")
+        console.print(f"[{theme['text_muted']}]Opened in browser[/{theme['text_muted']}]")
 
 
 @app.command()
@@ -862,6 +1186,14 @@ def vault_add(
     from .intelligence.privacy import PrivacyVault
     
     config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    error_color = semantic.get("error", "#EF4444")
     
     if not password:
         password = typer.prompt("Enter vault password", hide_input=True)
@@ -871,16 +1203,16 @@ def vault_add(
     # Find session directory
     task_dir = config.kilo_code_tasks_path / session_id
     if not task_dir.exists():
-        console.print(f"[red]Session not found: {session_id}[/red]")
+        console.print(f"[{error_color}]Session not found: {session_id}[/{error_color}]")
         raise typer.Exit(1)
     
-    with console.status("[bold]Adding to vault..."):
+    with console.status(f"[bold {info_color}]Adding to vault..."):
         success = vault.add_to_vault(session_id, task_dir)
     
     if success:
-        console.print(f"[green]OK Session {session_id[:16]}... added to vault[/green]")
+        console.print(f"[{success_color}]OK Session {session_id[:16]}... added to vault[/{success_color}]")
     else:
-        console.print("[red]Failed to add to vault[/red]")
+        console.print(f"[{error_color}]Failed to add to vault[/{error_color}]")
 
 
 @app.command()
@@ -888,22 +1220,33 @@ def vault_list():
     """List vaulted sessions."""
     from .intelligence.privacy import PrivacyVault
     
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    accent_color = semantic.get("accent", theme["text_primary"])
+    
     vault = PrivacyVault()
     sessions = vault.list_vaulted_sessions()
     
     if not sessions:
-        console.print("[dim]No sessions in vault[/dim]")
+        console.print(f"[{theme['text_muted']}]No sessions in vault[/{theme['text_muted']}]")
         return
     
     console.print(Panel.fit(
-        f"[bold]{len(sessions)} vaulted sessions[/bold]",
-        title="Privacy Vault"
+        f"[bold {info_color}]{len(sessions)} vaulted sessions[/bold {info_color}]",
+        title="Privacy Vault",
+        border_style=theme["panel_border"]
     ))
     
     table = Table(show_header=True)
-    table.add_column("Session", style="cyan")
-    table.add_column("Vaulted At", style="green")
-    table.add_column("Files", style="blue", justify="right")
+    table.add_column("Session", style=info_color)
+    table.add_column("Vaulted At", style=success_color)
+    table.add_column("Files", style=accent_color, justify="right")
     
     for session in sessions:
         table.add_row(
@@ -924,18 +1267,28 @@ def vault_restore(
     """Restore a session from the vault."""
     from .intelligence.privacy import PrivacyVault
     
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    error_color = semantic.get("error", "#EF4444")
+    
     if not password:
         password = typer.prompt("Enter vault password", hide_input=True)
     
     vault = PrivacyVault(password)
     
-    with console.status("[bold]Restoring from vault..."):
+    with console.status(f"[bold {info_color}]Restoring from vault..."):
         result = vault.restore_from_vault(session_id, output)
     
     if result:
-        console.print(f"[green]OK Session restored to: {result}[/green]")
+        console.print(f"[{success_color}]OK Session restored to: {result}[/{success_color}]")
     else:
-        console.print("[red]Failed to restore session[/red]")
+        console.print(f"[{error_color}]Failed to restore session[/{error_color}]")
 
 
 @app.command()
@@ -946,23 +1299,34 @@ def vault_search(
     """Search within vaulted sessions."""
     from .intelligence.privacy import PrivacyVault
     
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    accent_color = semantic.get("accent", theme["text_primary"])
+    
     if not password:
         password = typer.prompt("Enter vault password", hide_input=True)
     
     vault = PrivacyVault(password)
     
-    with console.status("[bold]Searching vault..."):
+    with console.status(f"[bold {info_color}]Searching vault..."):
         results = vault.search_vault(query)
     
     console.print(Panel.fit(
-        f"[bold]{len(results)} results[/bold]",
-        title="Vault Search"
+        f"[bold {info_color}]{len(results)} results[/bold {info_color}]",
+        title="Vault Search",
+        border_style=theme["panel_border"]
     ))
     
     for r in results[:10]:
         console.print(Panel(
-            f"[dim]{r['preview']}[/dim]",
-            title=f"{r['session_id'][:16]}... / {r['file']}"
+            f"[{theme['text_muted']}]{r['preview']}[/{theme['text_muted']}]",
+            title=f"{r['session_id'][:16]}... / {r['file']}",
+            border_style=theme["panel_border"]
         ))
 
 
@@ -975,30 +1339,42 @@ def test(
     """Run SmartFork tests."""
     from .testing.test_runner import create_default_test_runner
     
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    error_color = semantic.get("error", "#EF4444")
+    accent_color = semantic.get("accent", theme["text_primary"])
+    
     runner = create_default_test_runner()
     
     if suite:
-        with console.status(f"[bold]Running {suite} tests..."):
+        with console.status(f"[bold {info_color}]Running {suite} tests..."):
             result = runner.run_suite(suite)
         suites = [result]
     else:
-        with console.status("[bold]Running all tests..."):
+        with console.status(f"[bold {info_color}]Running all tests..."):
             suites = runner.run_all()
     
     # Display results
     for suite in suites:
-        color = "green" if suite.failed_count == 0 else "red"
+        suite_color = success_color if suite.failed_count == 0 else error_color
         console.print(Panel.fit(
-            f"[bold {color}]{suite.passed_count}/{len(suite.tests)} passed[/bold {color}]\n"
+            f"[bold {suite_color}]{suite.passed_count}/{len(suite.tests)} passed[/bold {suite_color}]\n"
             f"Duration: {suite.total_duration_ms:.0f}ms",
-            title=f"Test Suite: {suite.name}"
+            title=f"Test Suite: {suite.name}",
+            border_style=theme["panel_border"]
         ))
         
         if suite.failed_count > 0:
             table = Table(show_header=True)
-            table.add_column("Test", style="cyan")
-            table.add_column("Status", style="red")
-            table.add_column("Error", style="dim")
+            table.add_column("Test", style=info_color)
+            table.add_column("Status", style=error_color)
+            table.add_column("Error", style=theme["text_muted"])
             
             for test in suite.tests:
                 if not test.passed:
@@ -1011,8 +1387,8 @@ def test(
             console.print(table)
     
     summary = runner.get_summary()
-    console.print(f"\n[dim]Total: {summary['passed']}/{summary['total_tests']} passed "
-                  f"({summary['pass_rate']:.1%})[/dim]")
+    console.print(f"\n[{theme['text_muted']}]Total: {summary['passed']}/{summary['total_tests']} passed "
+                  f"({summary['pass_rate']:.1%})[/{theme['text_muted']}]")
 
 
 @app.command()
@@ -1022,18 +1398,31 @@ def metrics(
     """Show success metrics dashboard."""
     from .testing.metrics_tracker import MetricsTracker
     
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    error_color = semantic.get("error", "#EF4444")
+    accent_color = semantic.get("accent", theme["text_primary"])
+    
     tracker = MetricsTracker()
     data = tracker.get_dashboard_data(days)
     
     console.print(Panel.fit(
-        f"[bold]Success Metrics[/bold] (last {data['period_days']} days)",
-        title="Metrics Dashboard"
+        f"[bold {info_color}]Success Metrics[/bold {info_color}] (last {data['period_days']} days)",
+        title="Metrics Dashboard",
+        border_style=theme["panel_border"]
     ))
     
     # Key metrics
     table = Table(show_header=True)
-    table.add_column("Metric", style="cyan")
-    table.add_column("Value", style="green")
+    table.add_column("Metric", style=info_color)
+    table.add_column("Value", style=success_color)
     
     km = data['key_metrics']
     table.add_row("Unique Sessions", str(data['unique_sessions']))
@@ -1045,14 +1434,15 @@ def metrics(
     
     # Metric summaries
     if data['metric_summaries']:
-        console.print("\n[bold]Metric Trends:[/bold]")
+        console.print(f"\n[bold {info_color}]Metric Trends:[/bold {info_color}]")
         for name, summary in data['metric_summaries'].items():
-            trend_color = {
-                'improving': 'green',
-                'stable': 'yellow',
-                'degrading': 'red',
-                'insufficient_data': 'dim'
-            }.get(summary['trend'], 'white')
+            trend_color_map = {
+                'improving': success_color,
+                'stable': warning_color,
+                'degrading': error_color,
+                'insufficient_data': theme["text_muted"]
+            }
+            trend_color = trend_color_map.get(summary['trend'], theme["text_primary"])
             
             console.print(f"  {name}: {summary['mean']:.2f} "
                           f"([{trend_color}]{summary['trend']}[/{trend_color}])")
@@ -1063,22 +1453,34 @@ def ab_test_status():
     """Show A/B test status."""
     from .testing.ab_testing import ABTestManager
     
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    accent_color = semantic.get("accent", theme["text_primary"])
+    
     manager = ABTestManager()
     summary = manager.get_test_summary()
     
     console.print(Panel.fit(
-        f"[bold]{summary['total_tests']}[/bold] active tests\n"
-        f"[bold]{summary['total_sessions']}[/bold] test sessions",
-        title="A/B Testing"
+        f"[bold {info_color}]{summary['total_tests']}[/bold {info_color}] active tests\n"
+        f"[bold {info_color}]{summary['total_sessions']}[/bold {info_color}] test sessions",
+        title="A/B Testing",
+        border_style=theme["panel_border"]
     ))
     
     if summary['active_tests']:
         table = Table(show_header=True)
-        table.add_column("Test", style="cyan")
-        table.add_column("Sessions", style="green", justify="right")
-        table.add_column("Control", style="blue", justify="right")
-        table.add_column("Treatment", style="yellow", justify="right")
-        table.add_column("Result", style="magenta")
+        table.add_column("Test", style=info_color)
+        table.add_column("Sessions", style=success_color, justify="right")
+        table.add_column("Control", style=accent_color, justify="right")
+        table.add_column("Treatment", style=warning_color, justify="right")
+        table.add_column("Result", style=info_color)
         
         for test in summary['active_tests']:
             result_str = "No data"
@@ -1104,24 +1506,35 @@ def update_titles(
 ):
     """Generate or update session titles for all indexed sessions."""
     config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    error_color = semantic.get("error", "#EF4444")
+    accent_color = semantic.get("accent", theme["text_primary"])
     
     db = ChromaDatabase(config.chroma_db_path)
     
     if db.get_session_count() == 0:
-        console.print("[yellow]No sessions indexed. Run 'smartfork index' first.[/yellow]")
+        console.print(f"[{warning_color}]No sessions indexed. Run 'smartfork index' first.[/{warning_color}]")
         raise typer.Exit(1)
     
     # Get all unique sessions
     session_ids = db.get_unique_sessions()
     
     if not session_ids:
-        console.print("[yellow]No sessions found in database.[/yellow]")
+        console.print(f"[{warning_color}]No sessions found in database.[/{warning_color}]")
         raise typer.Exit(0)
     
     console.print(Panel.fit(
-        f"[bold blue]Update Session Titles[/bold blue]\n"
+        f"[bold {info_color}]Update Session Titles[/bold {info_color}]\n"
         f"Found {len(session_ids)} sessions to process",
-        title="SmartFork"
+        title="SmartFork",
+        border_style=theme["panel_border"]
     ))
     
     # Initialize title generator
@@ -1135,7 +1548,7 @@ def update_titles(
     failed = 0
     
     # Process each session
-    with console.status("[bold]Generating titles...") as status:
+    with console.status(f"[bold {info_color}]Generating titles...") as status:
         for i, session_id in enumerate(session_ids):
             try:
                 # Check if session already has a title (unless force)
@@ -1162,48 +1575,67 @@ def update_titles(
                 title = title_manager.generate_and_store_title(session)
                 
                 if dry_run:
-                    console.print(f"[dim]{session_id[:16]}...[/dim] -> {title}")
+                    console.print(f"[{theme['text_muted']}]{session_id[:16]}...[/{theme['text_muted']}] -> {title}")
                 else:
                     # Re-index the session to store the new title
                     # Note: This requires re-indexing since ChromaDB doesn't support metadata updates
-                    indexer = FullIndexer(db, chunk_size=config.chunk_size, chunk_overlap=config.chunk_overlap)
+                    indexer = FullIndexer(
+                        db, 
+                        chunk_size=config.chunk_size, 
+                        chunk_overlap=config.chunk_overlap,
+                        batch_size=config.batch_size
+                    )
                     indexer.index_session(task_dir)
                     
                 updated += 1
                 
                 if (i + 1) % 10 == 0:
-                    status.update(f"[bold]Processed {i + 1}/{len(session_ids)} sessions...")
+                    status.update(f"[bold {info_color}]Processed {i + 1}/{len(session_ids)} sessions...")
                     
             except Exception as e:
                 logger.error(f"Failed to update title for {session_id}: {e}")
                 failed += 1
+            
+            # Small delay in lite mode to reduce CPU usage
+            if config.lite_mode and i % 5 == 0:
+                time.sleep(0.1)
     
     # Display results
-    console.print("\n[bold]Results:[/bold]")
-    console.print(f"  [green]Updated:[/green] {updated}")
-    console.print(f"  [yellow]Skipped:[/yellow] {skipped}")
+    console.print(f"\n[bold {info_color}]Results:[/bold {info_color}]")
+    console.print(f"  [{success_color}]Updated:[/{success_color}] {updated}")
+    console.print(f"  [{warning_color}]Skipped:[/{warning_color}] {skipped}")
     if failed > 0:
-        console.print(f"  [red]Failed:[/red] {failed}")
+        console.print(f"  [{error_color}]Failed:[/{error_color}] {failed}")
     
     if dry_run:
-        console.print("\n[dim]This was a dry run. Use without --dry-run to apply changes.[/dim]")
+        console.print(f"\n[{theme['text_muted']}]This was a dry run. Use without --dry-run to apply changes.[/{theme['text_muted']}]")
     else:
-        console.print("\n[green]Title update complete![/green]")
+        console.print(f"\n[{success_color}]Title update complete![/{success_color}]")
 
 
 @app.command()
 def interactive():
     """Start the interactive shell (REPL mode)."""
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    error_color = semantic.get("error", "#EF4444")
+    
     console.print(Panel.fit(
-        "[bold cyan]SmartFork Interactive Mode[/bold cyan]\n"
+        f"[bold {info_color}]SmartFork Interactive Mode[/bold {info_color}]\n"
         "Starting interactive shell...",
-        title="SmartFork"
+        title="SmartFork",
+        border_style=theme["panel_border"]
     ))
     
     try:
         start_interactive_shell()
     except Exception as e:
-        console.print(f"[red]Error starting interactive shell: {e}[/red]")
+        console.print(f"[{error_color}]Error starting interactive shell: {e}[/{error_color}]")
         raise typer.Exit(1)
 
 

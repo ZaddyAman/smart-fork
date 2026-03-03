@@ -12,6 +12,17 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+# Export animation control functions
+__all__ = [
+    'SmartForkProgress', 'IndexingStats',
+    'display_discovery_phase', 'display_completion_summary',
+    'THEMES', 'DEFAULT_THEME',
+    'get_theme_colors', 'get_semantic_color',
+    'set_animation_fps', 'get_animation_fps', 
+    'set_adaptive_fps', 'mark_activity',
+    'AnimatedProgressDisplay', 'IndexingProgressDisplay'
+]
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # THEME SYSTEM — Six carefully crafted color palettes
@@ -32,6 +43,13 @@ THEMES = {
         "text_dim":     "#0F2A0F",
         "spinner_color":"#4ADE80",
         "done_color":   "#86EFAC",
+        "semantic": {
+            "success": "#4ADE80",
+            "warning": "#FBBF24",
+            "error": "#F87171",
+            "info": "#4ADE80",
+            "accent": "#86EFAC",
+        },
     },
     "obsidian": {
         "name": "Obsidian",
@@ -47,6 +65,13 @@ THEMES = {
         "text_dim":     "#1E2D3D",
         "spinner_color":"#94A3B8",
         "done_color":   "#CBD5E1",
+        "semantic": {
+            "success": "#94A3B8",
+            "warning": "#FCD34D",
+            "error": "#FCA5A5",
+            "info": "#94A3B8",
+            "accent": "#CBD5E1",
+        },
     },
     "ember": {
         "name": "Ember",
@@ -62,6 +87,13 @@ THEMES = {
         "text_dim":     "#3C1A00",
         "spinner_color":"#F59E0B",
         "done_color":   "#FCD34D",
+        "semantic": {
+            "success": "#F59E0B",
+            "warning": "#FCD34D",
+            "error": "#EF4444",
+            "info": "#F59E0B",
+            "accent": "#FCD34D",
+        },
     },
     "arctic": {
         "name": "Arctic",
@@ -77,6 +109,13 @@ THEMES = {
         "text_dim":     "#071524",
         "spinner_color":"#38BDF8",
         "done_color":   "#BAE6FD",
+        "semantic": {
+            "success": "#38BDF8",
+            "warning": "#7DD3FC",
+            "error": "#F87171",
+            "info": "#38BDF8",
+            "accent": "#BAE6FD",
+        },
     },
     "iron": {
         "name": "Iron",
@@ -92,6 +131,13 @@ THEMES = {
         "text_dim":     "#18152A",
         "spinner_color":"#9B8EC4",
         "done_color":   "#C4BAE8",
+        "semantic": {
+            "success": "#9B8EC4",
+            "warning": "#C4BAE8",
+            "error": "#F87171",
+            "info": "#9B8EC4",
+            "accent": "#C4BAE8",
+        },
     },
     "tungsten": {
         "name": "Tungsten",
@@ -107,17 +153,56 @@ THEMES = {
         "text_dim":     "#141414",
         "spinner_color":"#A3A3A3",
         "done_color":   "#D4D4D4",
+        "semantic": {
+            "success": "#A3A3A3",
+            "warning": "#D4D4D4",
+            "error": "#737373",
+            "info": "#A3A3A3",
+            "accent": "#D4D4D4",
+        },
     },
 }
 
 DEFAULT_THEME = "obsidian"
 
 
+def get_theme_colors(theme_name: str = DEFAULT_THEME) -> dict:
+    """Get full color palette for a theme.
+    
+    Args:
+        theme_name: Theme identifier (phosphor, obsidian, ember, arctic, iron, tungsten)
+        
+    Returns:
+        Dictionary containing all theme colors
+    """
+    return THEMES.get(theme_name, THEMES[DEFAULT_THEME])
+
+
+def get_semantic_color(theme_name: str, semantic_type: str) -> str:
+    """Get semantic color from theme.
+    
+    Args:
+        theme_name: Theme identifier
+        semantic_type: One of: success, warning, error, info, accent
+        
+    Returns:
+        Hex color code for the semantic type
+    """
+    theme = THEMES.get(theme_name, THEMES[DEFAULT_THEME])
+    semantic = theme.get("semantic", {})
+    return semantic.get(semantic_type, theme["text_primary"])
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ANIMATION CONSTANTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-ANIMATION_FPS        = 18
+# Default FPS (can be overridden via config)
+DEFAULT_ANIMATION_FPS = 10  # Reduced from 18 for lower CPU usage
+MIN_ANIMATION_FPS = 5       # Minimum FPS for lite mode
+ADAPTIVE_FPS_THRESHOLD = 30  # Seconds of inactivity before reducing FPS
+
+ANIMATION_FPS        = DEFAULT_ANIMATION_FPS
 MESH_ROWS            = 2
 MESH_CELLS_PER_ROW   = 52
 WAVE_SPEED_H         = 3.5
@@ -125,6 +210,46 @@ WAVE_SPEED_V         = 2.2
 WAVE_WEIGHT_H        = 0.45
 WAVE_WEIGHT_V        = 0.55
 FRONTIER_BLINK_SPEED = 0.22
+
+# Global animation settings (can be modified at runtime)
+_animation_fps = DEFAULT_ANIMATION_FPS
+_adaptive_fps_enabled = True
+_last_activity_time = time.time()
+
+
+def set_animation_fps(fps: int) -> None:
+    """Set the global animation FPS."""
+    global _animation_fps
+    _animation_fps = max(MIN_ANIMATION_FPS, min(30, fps))
+
+
+def get_animation_fps() -> int:
+    """Get current animation FPS, considering adaptive settings."""
+    global _animation_fps, _adaptive_fps_enabled, _last_activity_time
+    
+    if not _adaptive_fps_enabled:
+        return _animation_fps
+    
+    # Check for inactivity - reduce FPS if user hasn't interacted recently
+    inactive_seconds = time.time() - _last_activity_time
+    if inactive_seconds > ADAPTIVE_FPS_THRESHOLD:
+        # Gradually reduce FPS based on inactivity (max 50% reduction)
+        reduction = min(0.5, inactive_seconds / 300)  # Max reduction after 5 minutes
+        return max(MIN_ANIMATION_FPS, int(_animation_fps * (1 - reduction)))
+    
+    return _animation_fps
+
+
+def mark_activity() -> None:
+    """Mark that user activity has occurred (resets adaptive FPS)."""
+    global _last_activity_time
+    _last_activity_time = time.time()
+
+
+def set_adaptive_fps(enabled: bool) -> None:
+    """Enable or disable adaptive FPS."""
+    global _adaptive_fps_enabled
+    _adaptive_fps_enabled = enabled
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -392,7 +517,8 @@ class SmartForkProgress:
     """
 
     def __init__(self, total_sessions: int, theme_name: str = DEFAULT_THEME,
-                 console: Optional[Console] = None):
+                 console: Optional[Console] = None, animation_fps: Optional[int] = None,
+                 disable_animation: bool = False):
         if theme_name not in THEMES:
             theme_name = DEFAULT_THEME
         self._theme   = THEMES[theme_name]
@@ -402,20 +528,30 @@ class SmartForkProgress:
         self._running = False
         self._live:   Optional[Live]             = None
         self._thread: Optional[threading.Thread] = None
+        self._animation_fps = animation_fps or get_animation_fps()
+        self._disable_animation = disable_animation
+        self._last_progress_hash = None  # For change detection
+        self._frames_without_change = 0  # Skip frames when no change
 
     def __enter__(self) -> "SmartForkProgress":
+        # Use lower refresh rate for lite mode or disabled animations
+        refresh_rate = 2 if self._disable_animation else self._animation_fps
+        
         self._live = Live(
             _build_frame(self._stats, self._frame, self._theme),
             console=self._console,
-            refresh_per_second=ANIMATION_FPS,
+            refresh_per_second=refresh_rate,
             transient=False,
         )
         self._live.__enter__()
         self._running = True
-        self._thread  = threading.Thread(
-            target=self._loop, daemon=True, name="sf-anim"
-        )
-        self._thread.start()
+        
+        # Only start animation thread if not disabled
+        if not self._disable_animation:
+            self._thread = threading.Thread(
+                target=self._loop, daemon=True, name="sf-anim"
+            )
+            self._thread.start()
         return self
 
     def __exit__(self, *args):
@@ -428,9 +564,24 @@ class SmartForkProgress:
         return False
 
     def _loop(self):
-        """Animation loop running at ANIMATION_FPS."""
-        interval = 1.0 / ANIMATION_FPS
+        """Animation loop with adaptive FPS and change detection."""
         while self._running:
+            # Get current FPS (may be adaptively reduced)
+            current_fps = get_animation_fps()
+            interval = 1.0 / current_fps
+            
+            # Check if progress has actually changed
+            current_hash = self._get_progress_hash()
+            if current_hash == self._last_progress_hash:
+                self._frames_without_change += 1
+                # Skip rendering every other frame if no change (reduce CPU by 50%)
+                if self._frames_without_change > 3:  # After 3 frames of no change
+                    time.sleep(interval * 2)  # Double the interval
+                    continue
+            else:
+                self._frames_without_change = 0
+                self._last_progress_hash = current_hash
+            
             self._frame += 1
             if self._live:
                 try:
@@ -438,11 +589,16 @@ class SmartForkProgress:
                 except Exception:
                     pass
             time.sleep(interval)
+    
+    def _get_progress_hash(self) -> str:
+        """Get a hash of current progress state for change detection."""
+        return f"{self._stats.indexed_sessions}:{self._stats.phase_progress:.2f}:{self._stats.bm25_progress:.2f}:{self._stats.total_chunks}"
 
     # ── MUTATORS ──────────────────────────────────────────────────
 
     def set_session(self, name: str, title: str = "") -> None:
         """Call at start of each session. Resets phase bar to 0."""
+        mark_activity()  # Mark user activity for adaptive FPS
         self._stats.current_session_name  = name
         self._stats.current_session_title = title
         self._stats.phase_label           = "Parsing"
@@ -454,25 +610,30 @@ class SmartForkProgress:
         label: "Parsing" | "Embedding" | "Chunking" (max 12 chars)
         progress: 0.0 to 1.0
         """
+        mark_activity()  # Mark user activity for adaptive FPS
         self._stats.phase_label    = label
         self._stats.phase_progress = max(0.0, min(1.0, progress))
 
     def set_bm25(self, progress: float) -> None:
         """Update BM25 bar (Bar 3). Call after each session: (i+1)/total."""
+        mark_activity()  # Mark user activity for adaptive FPS
         self._stats.bm25_progress = max(0.0, min(1.0, progress))
 
     def advance(self, count: int = 1) -> None:
         """Advance sessions bar (Bar 1) by count. Call once per session."""
+        mark_activity()  # Mark user activity for adaptive FPS
         self._stats.indexed_sessions = min(
             self._stats.indexed_sessions + count, self._stats.total_sessions
         )
 
     def add_chunks(self, n: int) -> None:
         """Add n to running chunk total in header."""
+        mark_activity()  # Mark user activity for adaptive FPS
         self._stats.total_chunks += n
 
     def add_error(self) -> None:
         """Increment error counter shown in footer."""
+        mark_activity()  # Mark user activity for adaptive FPS
         self._stats.errors += 1
 
     def finish(self) -> None:
@@ -508,7 +669,7 @@ def display_discovery_phase(
     mod_c = 0
     frame = 0
 
-    with Live(refresh_per_second=15, console=console, transient=True) as live:
+    with Live(refresh_per_second=8, console=console, transient=True) as live:  # Reduced from 15 for lower CPU
         try:
             items = list(tasks_path.iterdir())
         except PermissionError as e:

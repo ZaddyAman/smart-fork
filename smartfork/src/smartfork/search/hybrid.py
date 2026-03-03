@@ -1,10 +1,13 @@
 """Hybrid search engine combining semantic, keyword, recency, and path signals."""
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from pathlib import Path
 import re
-from collections import defaultdict
+import hashlib
+import time
+from collections import defaultdict, OrderedDict
+from functools import lru_cache
 from loguru import logger
 
 from rank_bm25 import BM25Okapi
@@ -13,6 +16,71 @@ import numpy as np
 from ..database.chroma_db import ChromaDatabase
 from ..database.models import HybridResult, SearchResult
 from .semantic import SemanticSearchEngine
+
+
+class TimedLRUCache:
+    """LRU Cache with TTL support for search results."""
+    
+    def __init__(self, maxsize: int = 128, ttl: int = 300):
+        """Initialize cache.
+        
+        Args:
+            maxsize: Maximum number of items in cache
+            ttl: Time-to-live in seconds
+        """
+        self.maxsize = maxsize
+        self.ttl = ttl
+        self._cache: OrderedDict[str, Tuple[Any, float]] = OrderedDict()
+    
+    def _make_key(self, *args, **kwargs) -> str:
+        """Create a cache key from arguments."""
+        key_data = str(args) + str(sorted(kwargs.items()))
+        return hashlib.md5(key_data.encode()).hexdigest()
+    
+    def get(self, *args, **kwargs) -> Optional[Any]:
+        """Get item from cache if it exists and is not expired."""
+        key = self._make_key(*args, **kwargs)
+        
+        if key in self._cache:
+            value, timestamp = self._cache[key]
+            if time.time() - timestamp < self.ttl:
+                # Move to end (most recently used)
+                self._cache.move_to_end(key)
+                return value
+            else:
+                # Expired
+                del self._cache[key]
+        
+        return None
+    
+    def set(self, value: Any, *args, **kwargs) -> None:
+        """Set item in cache."""
+        key = self._make_key(*args, **kwargs)
+        
+        # Remove oldest if at capacity
+        if len(self._cache) >= self.maxsize:
+            self._cache.popitem(last=False)
+        
+        self._cache[key] = (value, time.time())
+        self._cache.move_to_end(key)
+    
+    def clear(self) -> None:
+        """Clear all cached items."""
+        self._cache.clear()
+    
+    def invalidate_session(self, session_id: str) -> None:
+        """Invalidate cache entries containing a specific session."""
+        keys_to_remove = []
+        for key in list(self._cache.keys()):
+            value, _ = self._cache[key]
+            if isinstance(value, list):
+                for item in value:
+                    if hasattr(item, 'session_id') and item.session_id == session_id:
+                        keys_to_remove.append(key)
+                        break
+        
+        for key in keys_to_remove:
+            del self._cache[key]
 
 
 class RecencyScorer:
@@ -203,11 +271,19 @@ class HybridSearchEngine:
         'path': 0.10
     }
     
-    def __init__(self, db: ChromaDatabase):
+    # Default cache settings
+    DEFAULT_CACHE_SIZE = 128
+    DEFAULT_CACHE_TTL = 300  # 5 minutes
+    
+    def __init__(self, db: ChromaDatabase, enable_cache: bool = True, 
+                 cache_size: int = DEFAULT_CACHE_SIZE, cache_ttl: int = DEFAULT_CACHE_TTL):
         """Initialize the hybrid search engine.
         
         Args:
             db: ChromaDatabase instance
+            enable_cache: Whether to enable search result caching
+            cache_size: Maximum number of cached results
+            cache_ttl: Cache time-to-live in seconds
         """
         self.db = db
         self.semantic = SemanticSearchEngine(db)
@@ -217,25 +293,56 @@ class HybridSearchEngine:
         
         # Cache for session metadata
         self._session_metadata: Dict[str, Dict[str, Any]] = {}
-    
-    def build_bm25_index(self) -> None:
-        """Build BM25 index from all sessions in the database."""
-        sessions = {}
         
+        # Search result cache
+        self._enable_cache = enable_cache
+        self._search_cache: Optional[TimedLRUCache] = TimedLRUCache(maxsize=cache_size, ttl=cache_ttl) if enable_cache else None
+        
+        # Track last index build time
+        self._index_built_at: Optional[float] = None
+    
+    def build_bm25_index(self, force_rebuild: bool = False) -> None:
+        """Build BM25 index from all sessions in the database.
+        
+        Args:
+            force_rebuild: If True, rebuild even if index already exists
+        """
+        # Skip rebuild if index is fresh (less than 5 minutes old)
+        if not force_rebuild and self._index_built_at and self.bm25.bm25:
+            age_seconds = time.time() - self._index_built_at
+            if age_seconds < 300:  # 5 minutes
+                logger.debug(f"BM25 index is fresh ({age_seconds:.0f}s old), skipping rebuild")
+                return
+        
+        sessions = {}
+        session_count = 0
+        
+        # Build index with batched metadata retrieval
         for session_id in self.db.get_unique_sessions():
-            chunks = self.db.get_session_chunks(session_id)
-            if chunks:
-                full_text = " ".join([c.content for c in chunks])
-                sessions[session_id] = full_text
-                
-                # Cache metadata
-                self._session_metadata[session_id] = {
-                    "files_in_context": chunks[0].metadata.files_in_context,
-                    "technologies": chunks[0].metadata.technologies,
-                    "last_active": chunks[0].metadata.last_active
-                }
+            # Skip if metadata already cached
+            if session_id in self._session_metadata and not force_rebuild:
+                # Use cached metadata but still need to build BM25
+                chunks = self.db.get_session_chunks(session_id)
+                if chunks:
+                    full_text = " ".join([c.content for c in chunks])
+                    sessions[session_id] = full_text
+            else:
+                chunks = self.db.get_session_chunks(session_id)
+                if chunks:
+                    full_text = " ".join([c.content for c in chunks])
+                    sessions[session_id] = full_text
+                    
+                    # Cache metadata
+                    self._session_metadata[session_id] = {
+                        "files_in_context": chunks[0].metadata.files_in_context,
+                        "technologies": chunks[0].metadata.technologies,
+                        "last_active": chunks[0].metadata.last_active
+                    }
+            
+            session_count += 1
         
         self.bm25.build_index(sessions)
+        self._index_built_at = time.time()
         logger.info(f"Hybrid search index built with {len(sessions)} sessions")
     
     def search(
@@ -244,7 +351,7 @@ class HybridSearchEngine:
         current_dir: Optional[str] = None,
         n_results: int = 10
     ) -> List[HybridResult]:
-        """Perform hybrid search.
+        """Perform hybrid search with caching support.
         
         Args:
             query: Search query
@@ -254,6 +361,13 @@ class HybridSearchEngine:
         Returns:
             List of HybridResult objects sorted by score
         """
+        # Check cache first
+        if self._enable_cache and self._search_cache:
+            cached = self._search_cache.get(query, current_dir, n_results)
+            if cached is not None:
+                logger.debug(f"Search cache hit for query: {query[:30]}...")
+                return cached
+        
         # Build BM25 index if not already built
         if not self.bm25.bm25:
             self.build_bm25_index()
@@ -318,7 +432,46 @@ class HybridSearchEngine:
         
         # Sort by final score
         combined.sort(key=lambda x: x.score, reverse=True)
-        return combined[:n_results]
+        results = combined[:n_results]
+        
+        # Cache the results
+        if self._enable_cache and self._search_cache:
+            self._search_cache.set(results, query, current_dir, n_results)
+            logger.debug(f"Cached search results for query: {query[:30]}...")
+        
+        return results
+    
+    def invalidate_cache(self, session_id: Optional[str] = None) -> None:
+        """Invalidate search cache.
+        
+        Args:
+            session_id: If provided, only invalidate entries containing this session.
+                       If None, clear entire cache.
+        """
+        if not self._search_cache:
+            return
+        
+        if session_id:
+            self._search_cache.invalidate_session(session_id)
+            logger.debug(f"Invalidated cache for session: {session_id}")
+        else:
+            self._search_cache.clear()
+            logger.debug("Cleared entire search cache")
+        
+        # Also mark index as needing rebuild
+        self._index_built_at = None
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        if not self._search_cache:
+            return {"enabled": False}
+        
+        return {
+            "enabled": True,
+            "size": len(self._search_cache._cache),
+            "maxsize": self._search_cache.maxsize,
+            "ttl": self._search_cache.ttl
+        }
     
     def _get_score(self, results: List[SearchResult], session_id: str) -> float:
         """Get score for a session from results list."""

@@ -24,6 +24,7 @@ src/smartfork/intelligence/branching.py
 src/smartfork/intelligence/clustering.py
 src/smartfork/intelligence/pre_compaction.py
 src/smartfork/intelligence/privacy.py
+src/smartfork/intelligence/titling.py
 src/smartfork/search/__init__.py
 src/smartfork/search/hybrid.py
 src/smartfork/search/semantic.py
@@ -31,3 +32,8 @@ src/smartfork/testing/__init__.py
 src/smartfork/testing/ab_testing.py
 src/smartfork/testing/metrics_tracker.py
 src/smartfork/testing/test_runner.py
+src/smartfork/ui/__init__.py
+src/smartfork/ui/contextual_help.py
+src/smartfork/ui/interactive.py
+src/smartfork/ui/progress.py
+src/smartfork/ui/progress_old.py

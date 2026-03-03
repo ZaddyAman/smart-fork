@@ -8,6 +8,10 @@ from loguru import logger
 
 from .models import Chunk, ChunkMetadata, SearchResult
 
+# Default batch size for operations
+DEFAULT_BATCH_SIZE = 100
+MAX_BATCH_SIZE = 1000
+
 
 class ChromaDatabase:
     """Manages ChromaDB connection and operations."""
@@ -38,52 +42,65 @@ class ChromaDatabase:
             metadata={"hnsw:space": "cosine"}
         )
     
-    def add_chunks(self, chunks: List[Chunk]) -> None:
-        """Add conversation chunks to the database.
+    def add_chunks(self, chunks: List[Chunk], batch_size: int = DEFAULT_BATCH_SIZE) -> None:
+        """Add conversation chunks to the database with batching support.
         
         Args:
             chunks: List of Chunk objects to add
+            batch_size: Number of chunks to add in each batch (default: 100)
         """
         import json
         
         if not chunks:
             return
         
-        ids = [chunk.id for chunk in chunks]
-        documents = [chunk.content for chunk in chunks]
-        embeddings = [chunk.embedding for chunk in chunks if chunk.embedding]
+        # Validate and clamp batch size
+        batch_size = max(10, min(MAX_BATCH_SIZE, batch_size))
         
-        # Convert metadata to ChromaDB-compatible format (no lists, no None values)
-        metadatas = []
-        for chunk in chunks:
-            meta = chunk.metadata.model_dump()
-            # Convert lists to JSON strings and remove None values
-            cleaned_meta = {}
-            for key, value in meta.items():
-                if value is None:
-                    continue  # Skip None values
-                elif isinstance(value, list):
-                    cleaned_meta[key] = json.dumps(value)
-                else:
-                    cleaned_meta[key] = value
-            metadatas.append(cleaned_meta)
+        total_added = 0
         
-        # If no embeddings provided, ChromaDB will generate them
-        if embeddings and len(embeddings) == len(chunks):
-            self.collection.add(
-                ids=ids,
-                documents=documents,
-                embeddings=embeddings,
-                metadatas=metadatas
-            )
-        else:
-            self.collection.add(
-                ids=ids,
-                documents=documents,
-                metadatas=metadatas
-            )
+        # Process in batches
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i:i + batch_size]
+            
+            ids = [chunk.id for chunk in batch]
+            documents = [chunk.content for chunk in batch]
+            embeddings = [chunk.embedding for chunk in batch if chunk.embedding]
+            
+            # Convert metadata to ChromaDB-compatible format (no lists, no None values)
+            metadatas = []
+            for chunk in batch:
+                meta = chunk.metadata.model_dump()
+                # Convert lists to JSON strings and remove None values
+                cleaned_meta = {}
+                for key, value in meta.items():
+                    if value is None:
+                        continue  # Skip None values
+                    elif isinstance(value, list):
+                        cleaned_meta[key] = json.dumps(value)
+                    else:
+                        cleaned_meta[key] = value
+                metadatas.append(cleaned_meta)
+            
+            # If no embeddings provided, ChromaDB will generate them
+            if embeddings and len(embeddings) == len(batch):
+                self.collection.add(
+                    ids=ids,
+                    documents=documents,
+                    embeddings=embeddings,
+                    metadatas=metadatas
+                )
+            else:
+                self.collection.add(
+                    ids=ids,
+                    documents=documents,
+                    metadatas=metadatas
+                )
+            
+            total_added += len(batch)
+            logger.debug(f"Added batch of {len(batch)} chunks ({total_added}/{len(chunks)})")
         
-        logger.debug(f"Added {len(chunks)} chunks to database")
+        logger.debug(f"Added {total_added} chunks to database in {len(chunks) // batch_size + 1} batches")
     
     def search(
         self, 

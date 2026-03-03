@@ -7,6 +7,8 @@ from .progress import (
     display_completion_summary,
     THEMES,
     DEFAULT_THEME,
+    get_theme_colors,
+    get_semantic_color,
     # Backward compatibility
     AnimatedProgressDisplay,
     IndexingProgressDisplay,
@@ -31,6 +33,8 @@ __all__ = [
     "display_completion_summary",
     "THEMES",
     "DEFAULT_THEME",
+    "get_theme_colors",
+    "get_semantic_color",
     # Backward compatibility
     "AnimatedProgressDisplay",
     "IndexingProgressDisplay",

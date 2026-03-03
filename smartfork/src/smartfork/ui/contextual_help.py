@@ -17,6 +17,8 @@ from rich.text import Text
 from rich.table import Table
 from rich import box
 
+from ..ui.progress import DEFAULT_THEME, get_theme_colors, get_semantic_color
+
 
 class UserAction(Enum):
     """Trackable user actions."""
@@ -89,17 +91,45 @@ class ContextualHelpManager:
         "clock": "[t]",
     }
     
-    def __init__(self, console: Optional[Console] = None):
+    def __init__(self, console: Optional[Console] = None, theme_name: Optional[str] = None):
         """Initialize the contextual help manager.
         
         Args:
             console: Optional Rich console instance
+            theme_name: Optional theme name override
         """
         self.console = console or Console()
         self.history: List[ActionHistory] = []
         self.state_file = Path.home() / ".smartfork" / "user_state.json"
         self.shown_tips: set = self._load_shown_tips()
         self._state_cache: Optional[Dict[UserState, bool]] = None
+        self._theme_name = theme_name or DEFAULT_THEME
+        self._theme = get_theme_colors(self._theme_name)
+    
+    def _get_theme_colors(self):
+        """Get current theme colors."""
+        from ..config import get_config
+        try:
+            config = get_config()
+            theme_name = getattr(config, "theme", self._theme_name)
+            return get_theme_colors(theme_name)
+        except Exception:
+            return self._theme
+    
+    def _get_semantic_colors(self):
+        """Get semantic colors from current theme."""
+        theme = self._get_theme_colors()
+        semantic = theme.get("semantic", {})
+        return {
+            "info": semantic.get("info", theme["text_primary"]),
+            "success": semantic.get("success", theme["done_color"]),
+            "warning": semantic.get("warning", "#F59E0B"),
+            "error": semantic.get("error", "#EF4444"),
+            "accent": semantic.get("accent", theme["text_primary"]),
+            "text_primary": theme["text_primary"],
+            "text_muted": theme["text_muted"],
+            "panel_border": theme["panel_border"],
+        }
     
     def _load_shown_tips(self) -> set:
         """Load the set of tips already shown to user."""
@@ -241,29 +271,31 @@ class ContextualHelpManager:
         Returns:
             Rich Panel with welcome message
         """
+        colors = self._get_semantic_colors()
+        
         content = Text()
-        content.append("Welcome to SmartFork!\n\n", style="bold cyan")
+        content.append("Welcome to SmartFork!\n\n", style=f"bold {colors['info']}")
         content.append("SmartFork helps you reuse context from your Kilo Code sessions.\n\n")
         
-        content.append("Quick Start:\n", style="bold")
+        content.append("Quick Start:\n", style=f"bold {colors['text_primary']}")
         steps = [
             ("1. Index your sessions", "smartfork index"),
             ("2. Search for relevant context", "smartfork search 'your task'"),
             ("3. Fork context when needed", "smartfork fork <session_id>"),
         ]
         for step, cmd in steps:
-            content.append(f"  {step}\n", style="dim")
-            content.append(f"     ", style="dim")
-            content.append(f"$ {cmd}\n", style="green")
+            content.append(f"  {step}\n", style=f"dim {colors['text_muted']}")
+            content.append(f"     ", style=f"dim {colors['text_muted']}")
+            content.append(f"$ {cmd}\n", style=colors['success'])
         
         content.append("\n")
-        content.append("Tip: ", style="yellow")
-        content.append("Use --watch during indexing to auto-update.\n", style="dim")
+        content.append("Tip: ", style=colors['warning'])
+        content.append("Use --watch during indexing to auto-update.\n", style=f"dim {colors['text_muted']}")
         
         return Panel(
             content,
-            title="[bold]SmartFork - AI Session Intelligence[/bold]",
-            border_style="cyan",
+            title=f"[bold {colors['info']}]SmartFork - AI Session Intelligence[/bold {colors['info']}]",
+            border_style=colors['panel_border'],
             box=box.ROUNDED
         )
     
@@ -465,6 +497,8 @@ class ContextualHelpManager:
         if not tips:
             return None
         
+        colors = self._get_semantic_colors()
+        
         # Sort by priority (highest first)
         tips.sort(key=lambda t: t.priority, reverse=True)
         
@@ -474,21 +508,21 @@ class ContextualHelpManager:
                 content.append("\n\n")
             
             # Icon and title
-            content.append(f"{tip.icon} ", style="cyan")
-            content.append(f"{tip.title}\n", style="bold")
+            content.append(f"{tip.icon} ", style=colors['info'])
+            content.append(f"{tip.title}\n", style=f"bold {colors['text_primary']}")
             
             # Message
-            content.append(f"  {tip.message}\n", style="dim")
+            content.append(f"  {tip.message}\n", style=f"dim {colors['text_muted']}")
             
             # Command if present
             if tip.command:
-                content.append(f"  ", style="dim")
-                content.append(f"$ {tip.command}", style="green")
+                content.append(f"  ", style=f"dim {colors['text_muted']}")
+                content.append(f"$ {tip.command}", style=colors['success'])
         
         return Panel(
             content,
-            title=f"[bold]{title}[/bold]",
-            border_style="blue",
+            title=f"[bold {colors['info']}]{title}[/bold {colors['info']}]",
+            border_style=colors['panel_border'],
             box=box.ROUNDED
         )
     
@@ -507,17 +541,19 @@ class ContextualHelpManager:
             icon: Icon key to use
             command: Optional command to show
         """
+        colors = self._get_semantic_colors()
+        
         content = Text()
-        content.append(f"{self.ICONS.get(icon, self.ICONS['info'])} ", style="cyan")
-        content.append(f"{title}\n", style="bold")
-        content.append(f"  {message}\n", style="dim")
+        content.append(f"{self.ICONS.get(icon, self.ICONS['info'])} ", style=colors['info'])
+        content.append(f"{title}\n", style=f"bold {colors['text_primary']}")
+        content.append(f"  {message}\n", style=f"dim {colors['text_muted']}")
         if command:
-            content.append(f"  ", style="dim")
-            content.append(f"$ {command}", style="green")
+            content.append(f"  ", style=f"dim {colors['text_muted']}")
+            content.append(f"$ {command}", style=colors['success'])
         
         panel = Panel(
             content,
-            border_style="blue",
+            border_style=colors['panel_border'],
             box=box.ROUNDED
         )
         self.console.print(panel)
@@ -577,18 +613,19 @@ class ContextualHelpManager:
 _help_manager: Optional[ContextualHelpManager] = None
 
 
-def get_help_manager(console: Optional[Console] = None) -> ContextualHelpManager:
+def get_help_manager(console: Optional[Console] = None, theme_name: Optional[str] = None) -> ContextualHelpManager:
     """Get the global help manager instance.
     
     Args:
         console: Optional Rich console
+        theme_name: Optional theme name override
         
     Returns:
         ContextualHelpManager instance
     """
     global _help_manager
     if _help_manager is None:
-        _help_manager = ContextualHelpManager(console)
+        _help_manager = ContextualHelpManager(console, theme_name=theme_name)
     return _help_manager
 
 
