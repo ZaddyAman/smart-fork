@@ -30,7 +30,11 @@ from ..config import get_config
 from ..database.chroma_db import ChromaDatabase
 from ..search.hybrid import HybridSearchEngine
 from ..fork.generator import ForkMDGenerator
-from ..ui.progress import DEFAULT_THEME, get_theme_colors, get_semantic_color
+from ..fork.smart_generator import SmartForkMDGenerator, ContextExtractionConfig
+from ..ui.progress import (
+    DEFAULT_THEME, get_theme_colors, get_semantic_color,
+    display_discovery_phase, SmartForkProgress,
+)
 
 
 class SmartForkShell(cmd.Cmd):
@@ -271,10 +275,6 @@ class SmartForkShell(cmd.Cmd):
                     f"path:{breakdown.get('path', 0):.2f}"
                 ])
                 
-                # Get technologies
-                techs = r.metadata.get("technologies", [])
-                tech_str = f"\n[{self.theme['text_muted']}]Tech: {', '.join(techs[:3])}[/{self.theme['text_muted']}]" if techs else ""
-                
                 # Get last active
                 last_active = r.metadata.get("last_active", "Unknown")
                 if last_active and last_active != "Unknown":
@@ -293,7 +293,7 @@ class SmartForkShell(cmd.Cmd):
                     border = self.error_color
                 
                 panel_content = f"[bold {self.info_color}]Score:[/bold {self.info_color}] {score_pct}\n"
-                panel_content += f"[{self.theme['text_muted']}]{breakdown_str}[/{self.theme['text_muted']}]{tech_str}\n"
+                panel_content += f"[{self.theme['text_muted']}]{breakdown_str}[/{self.theme['text_muted']}]\n"
                 panel_content += f"[{self.theme['text_muted']}]Last active: {last_active}[/{self.theme['text_muted']}]"
                 
                 self.console.print(Panel(
@@ -313,23 +313,37 @@ class SmartForkShell(cmd.Cmd):
     def do_fork(self, arg: str):
         """Generate a fork.md context file from a session.
         
-        Usage: fork <session_id_or_number>
+        Usage: fork <session_id_or_number> [query] [--smart]
         Alias: f
         
         If a number is provided (1-9), forks the corresponding result from last search or sessions list.
+        If a query is provided with --smart flag, uses query-aware smart fork generation.
         """
         if not self._ensure_db():
             return
         
         arg = arg.strip()
         if not arg:
-            self.console.print(f"[{self.error_color}]Usage: fork <session_id_or_number>[/{self.error_color}]")
+            self.console.print(f"[{self.error_color}]Usage: fork <session_id_or_number> [query] [--smart][/{self.error_color}]")
             return
         
+        # Parse arguments
+        parts = shlex.split(arg)
+        
+        # Check for --smart flag
+        use_smart = "--smart" in parts
+        if use_smart:
+            parts.remove("--smart")
+        
+        # First part is the session identifier (ID or number)
+        session_arg = parts[0]
+        # Rest could be a query for smart mode
+        query = ' '.join(parts[1:]) if len(parts) > 1 else None
+        
         # Check if it's a number referring to last search results or sessions list
-        session_id = arg
-        if arg.isdigit():
-            num = int(arg)
+        session_id = session_arg
+        if session_arg.isdigit():
+            num = int(session_arg)
             # Check last_results first (from search/detect-fork)
             if self.last_results:
                 if num < 1 or num > len(self.last_results):
@@ -362,9 +376,20 @@ class SmartForkShell(cmd.Cmd):
             else:
                 self.console.print(f"[bold {self.info_color}]Generating fork.md for session:[/bold {self.info_color}] {session_id[:20]}...")
             
-            # Generate fork.md
             current_dir = str(Path.cwd())
-            content = self.fork_generator.generate(session_id, "forked from interactive shell", current_dir)
+            
+            # Use smart fork if --smart flag is set and query is provided
+            if use_smart:
+                if not query:
+                    self.console.print(f"[{self.error_color}]Error: --smart requires a query. Usage: fork <session_id> <query> --smart[/{self.error_color}]")
+                    return
+                
+                self.console.print(f"[{self.theme['text_muted']}]Using smart query-aware generation[/{self.theme['text_muted']}]")
+                generator = SmartForkMDGenerator(self.db)
+                content = generator.generate(session_id, query, current_dir)
+            else:
+                # Use standard fork generator
+                content = self.fork_generator.generate(session_id, query or "forked from interactive shell", current_dir)
             
             # Save to file
             short_id = session_id[:8]
@@ -378,6 +403,195 @@ class SmartForkShell(cmd.Cmd):
     
     # Shortcut for fork
     do_f = do_fork
+    
+    def do_smartfork(self, arg: str):
+        """Generate a smart context fork based on a query.
+        
+        Usage: smartfork <session_id> [query] [--max-tokens N] [--output path]
+        
+        Generates context-aware fork.md using query-based chunk retrieval.
+        If output path is not provided, shows preview and prompts to save.
+        """
+        if not self._ensure_db():
+            return
+        
+        if not arg.strip():
+            self.console.print(f"[{self.error_color}]Usage: smartfork <session_id> [query] [--max-tokens N] [--output path][/{self.error_color}]")
+            return
+        
+        # Parse arguments: session is first word, rest is query until -- flags
+        parts = shlex.split(arg)
+        if len(parts) < 2:
+            self.console.print(f"[{self.error_color}]Error: Both session_id and query are required[/{self.error_color}]")
+            return
+        
+        session_id = parts[0]
+        
+        # Find -- flags, treat rest as query
+        query_parts = []
+        max_tokens = 2000
+        output_path = None
+        
+        i = 1
+        while i < len(parts):
+            if parts[i] == '--max-tokens' and i + 1 < len(parts):
+                try:
+                    max_tokens = int(parts[i + 1])
+                except ValueError:
+                    self.console.print(f"[{self.warning_color}]Warning: Invalid max-tokens value, using default 2000[/{self.warning_color}]")
+                i += 2
+            elif parts[i] == '--output' and i + 1 < len(parts):
+                output_path = Path(parts[i + 1])
+                i += 2
+            else:
+                query_parts.append(parts[i])
+                i += 1
+        
+        query = ' '.join(query_parts)
+        if not query:
+            self.console.print(f"[{self.error_color}]Error: Query is required[/{self.error_color}]")
+            return
+        
+        # Check if session exists
+        try:
+            chunks = self.db.get_session_chunks(session_id)
+            if not chunks:
+                self.console.print(f"[{self.error_color}]Session not found: {session_id}[/{self.error_color}]")
+                return
+            
+            # Get session title if available
+            session_title = chunks[0].metadata.session_title if chunks else None
+            if session_title:
+                self.console.print(f"[bold {self.info_color}]Generating smart fork for:[/bold {self.info_color}] {session_title}")
+            else:
+                self.console.print(f"[bold {self.info_color}]Generating smart fork for session:[/bold {self.info_color}] {session_id[:20]}...")
+            
+            self.console.print(f"[{self.theme['text_muted']}]Query: {query}[/{self.theme['text_muted']}]")
+            
+        except Exception as e:
+            self.console.print(f"[{self.error_color}]Error checking session: {e}[/{self.error_color}]")
+            return
+        
+        # Generate smart fork
+        try:
+            current_dir = str(Path.cwd())
+            generator = SmartForkMDGenerator(self.db)
+            content = generator.generate(session_id, query, current_dir, max_tokens=max_tokens)
+            
+            # Preview
+            self.console.print(f"\n[bold {self.info_color}]{'='*60}[/bold {self.info_color}]")
+            self.console.print(f"[bold {self.info_color}]SMART FORK PREVIEW[/bold {self.info_color}]")
+            self.console.print(f"[bold {self.info_color}]{'='*60}[/bold {self.info_color}]")
+            
+            preview = content[:1000] + "..." if len(content) > 1000 else content
+            self.console.print(Panel(
+                preview,
+                border_style=self.theme["panel_border"]
+            ))
+            
+            self.console.print(f"[bold {self.info_color}]{'='*60}[/bold {self.info_color}]")
+            self.console.print(f"\n[{self.theme['text_muted']}]Total length: {len(content)} chars, ~{len(content)//4} tokens[/{self.theme['text_muted']}]")
+            
+            # Save
+            if output_path:
+                generator.save(session_id, query, output_path, current_dir, max_tokens=max_tokens)
+                self.console.print(f"[{self.success_color}]✓ Saved to:[/{self.success_color}] {output_path}")
+            else:
+                save = input("Save to file? (y/n): ").lower()
+                if save == 'y':
+                    path_input = input("Enter file path: ").strip()
+                    if path_input:
+                        save_path = Path(path_input)
+                        generator.save(session_id, query, save_path, current_dir, max_tokens=max_tokens)
+                        self.console.print(f"[{self.success_color}]✓ Saved to:[/{self.success_color}] {save_path}")
+                    else:
+                        self.console.print(f"[{self.warning_color}]No path provided, file not saved[/{self.warning_color}]")
+                        
+        except Exception as e:
+            self.console.print(f"[{self.error_color}]Smart fork error: {e}[/{self.error_color}]")
+    
+    def do_resume(self, arg: str):
+        """Quick resume with query - shortcut for smartfork.
+        
+        Usage: resume <session_id> <query>
+        
+        Generates smart context fork with default settings.
+        Equivalent to: smartfork <session_id> <query>
+        """
+        if not self._ensure_db():
+            return
+        
+        if not arg.strip():
+            self.console.print(f"[{self.error_color}]Usage: resume <session_id> <query>[/{self.error_color}]")
+            return
+        
+        # Parse: session is first word, rest is query
+        parts = shlex.split(arg)
+        if len(parts) < 2:
+            self.console.print(f"[{self.error_color}]Error: Both session_id and query are required[/{self.error_color}]")
+            return
+        
+        session_id = parts[0]
+        query = ' '.join(parts[1:])
+        
+        # Delegate to smartfork with defaults
+        self.console.print(f"[{self.theme['text_muted']}]Resuming session with query-aware extraction...[/{self.theme['text_muted']}]")
+        self.do_smartfork(f"{session_id} {query}")
+    
+    def help_smartfork(self):
+        """Display help for smartfork command."""
+        help_text = f"""[bold {self.info_color}]smartfork - Generate smart context fork based on query[/bold {self.info_color}]
+
+Usage:
+  smartfork <session_id> [query] [--max-tokens N] [--output path]
+
+Arguments:
+  session_id    The session ID to fork context from
+  query         Search query for context extraction (required)
+
+Options:
+  --max-tokens N    Maximum tokens to include (default: 2000)
+  --output path     Output file path (optional, prompts if not provided)
+
+Examples:
+  smartfork task_abc123 JWT authentication
+  smartfork task_abc123 database connection pooling --max-tokens 3000
+  smartfork task_abc123 API error handling --output my_fork.md
+
+Description:
+  Uses query-aware chunk retrieval to find the most relevant
+  context from the session, creating a focused fork.md file."""
+        
+        self.console.print(Panel(
+            help_text,
+            title="Help: smartfork",
+            border_style=self.theme["panel_border"]
+        ))
+    
+    def help_resume(self):
+        """Display help for resume command."""
+        help_text = f"""[bold {self.info_color}]resume - Quick resume with query[/bold {self.info_color}]
+
+Usage:
+  resume <session_id> <query>
+
+Arguments:
+  session_id    The session ID to resume from
+  query         Search query describing what you want to retrieve
+
+Examples:
+  resume task_abc123 authentication middleware
+  resume task_xyz789 database migration issues
+
+Description:
+  A convenience shortcut for 'smartfork' with default settings.
+  Generates a smart context fork to resume work on a previous task."""
+        
+        self.console.print(Panel(
+            help_text,
+            title="Help: resume",
+            border_style=self.theme["panel_border"]
+        ))
     
     def do_detect_fork(self, arg: str):
         """Find relevant past sessions to fork context from.
@@ -431,10 +645,6 @@ class SmartForkShell(cmd.Cmd):
                 else:
                     title_text = f"[{i}] {r.session_id[:20]}..."
                 
-                # Get technologies
-                techs = r.metadata.get("technologies", [])
-                tech_str = f"\n[{self.theme['text_muted']}]Tech:[/{self.theme['text_muted']}] {', '.join(techs[:5])}" if techs else ""
-                
                 # Get files
                 files = r.metadata.get("files_in_context", [])
                 files_preview = f"\n[{self.theme['text_muted']}]Files:[/{self.theme['text_muted']}] {', '.join(files[:3])}..." if len(files) > 3 else f"\n[{self.theme['text_muted']}]Files:[/{self.theme['text_muted']}] {', '.join(files)}" if files else ""
@@ -461,7 +671,7 @@ class SmartForkShell(cmd.Cmd):
                 
                 match_str = f" ({', '.join(match_reasons)})" if match_reasons else ""
                 
-                panel_content = f"[bold {self.success_color}]{score_pct}[/bold {self.success_color}] relevance{match_str}{tech_str}{files_preview}\n\n"
+                panel_content = f"[bold {self.success_color}]{score_pct}[/bold {self.success_color}] relevance{match_str}{files_preview}\n\n"
                 panel_content += f"[{self.theme['text_muted']}]Last active: {last_active}[/{self.theme['text_muted']}]"
                 
                 self.console.print(Panel(
@@ -484,7 +694,6 @@ class SmartForkShell(cmd.Cmd):
         Usage: index [--force]
         """
         from ..indexer.indexer import FullIndexer
-        from ..ui.progress import AnimatedProgressDisplay
         
         # Check if tasks path exists
         if not self.config.kilo_code_tasks_path.exists():
@@ -515,9 +724,6 @@ class SmartForkShell(cmd.Cmd):
             self.console.print(f"[{self.warning_color}]No sessions found to index.[/{self.warning_color}]")
             return
         
-        # Use animated progress display
-        progress_display = AnimatedProgressDisplay(self.console)
-        
         # Discovery phase
         db_session_ids = set()
         try:
@@ -525,7 +731,13 @@ class SmartForkShell(cmd.Cmd):
         except Exception:
             pass
         
-        progress_display.display_discovery_phase(all_sessions, db_session_ids)
+        # Use standalone function instead of method
+        all_sessions, new_count, _ = display_discovery_phase(
+            tasks_path=self.config.kilo_code_tasks_path,
+            db_session_ids=db_session_ids,
+            console=self.console,
+            theme_name=self.theme_name,
+        )
         
         # Filter to only new sessions
         sessions_to_index = [s for s in all_sessions if s.name not in db_session_ids]
@@ -533,8 +745,6 @@ class SmartForkShell(cmd.Cmd):
         if not sessions_to_index:
             self.console.print(f"\n[{self.success_color}]All sessions already indexed. No new sessions to process.[/{self.success_color}]")
             total_db_sessions = len(db_session_ids)
-            progress_display.display_completion_summary(total_db_sessions)
-            
             # Re-initialize search engine with updated db
             self.search_engine = HybridSearchEngine(self.db)
             self.fork_generator = ForkMDGenerator(self.db)
@@ -542,23 +752,39 @@ class SmartForkShell(cmd.Cmd):
         
         self.console.print(f"[{self.info_color}]-> Indexing {len(sessions_to_index)} new sessions...[/{self.info_color}]\n")
         
-        # Indexing phase
-        def index_one(session_dir: Path):
-            """Index a single session and return chunks + title."""
-            chunks = indexer.index_session(session_dir)
+        # Use animated progress display
+        with SmartForkProgress(total_sessions=len(sessions_to_index), theme_name=self.theme_name, console=self.console) as progress:
+            for i, session_dir in enumerate(sessions_to_index):
+                progress.set_session(session_dir.name)
+                progress.set_phase("Parsing", 0.0)
+                
+                # Index the session
+                try:
+                    chunks = indexer.index_session(session_dir)
+                    progress.set_phase("Parsing", 1.0)
+                    progress.set_phase("Embedding", 0.0)
+                    
+                    # Get title from DB
+                    title = None
+                    try:
+                        session_chunks = self.db.get_session_chunks(session_dir.name)
+                        if session_chunks and len(session_chunks) > 0:
+                            title = session_chunks[0].metadata.session_title
+                            progress.set_phase("Embedding", 1.0)
+                    except Exception:
+                        progress.set_phase("Embedding", 1.0)
+                    
+                    progress.add_chunks(chunks)
+                    progress.set_bm25((i + 1) / len(sessions_to_index))
+                    progress.advance()
+                except Exception as e:
+                    progress.add_error()
+                    self.console.print(f"[{self.error_color}]Error indexing {session_dir.name}: {e}[/{self.error_color}]")
             
-            # Try to get title from chunks in DB
-            title = None
-            try:
-                session_chunks = self.db.get_session_chunks(session_dir.name)
-                if session_chunks and len(session_chunks) > 0:
-                    title = session_chunks[0].metadata.session_title
-            except Exception:
-                pass
-            
-            return chunks, title
+            progress.finish()
         
-        results = progress_display.display_indexing_progress(sessions_to_index, index_one)
+        # CRITICAL: Finalize to flush any remaining pending chunks to database
+        indexer.finalize()
         
         # Get final stats
         total_db_sessions = 0
@@ -568,7 +794,7 @@ class SmartForkShell(cmd.Cmd):
             pass
         
         # Display completion summary
-        progress_display.display_completion_summary(total_db_sessions)
+        self.console.print(f"\n[{self.success_color}]✓ Indexing complete! {total_db_sessions} sessions indexed.[/{self.success_color}]")
         
         # Re-initialize search engine with updated db
         self.search_engine = HybridSearchEngine(self.db)
@@ -835,7 +1061,7 @@ class SmartForkShell(cmd.Cmd):
         td = THEMES[theme_name]
         c = td["bars"][1]["color"]
         self.console.print(f"\n  [{c}]✓[/{c}] Theme → [bold]{td['name']}[/bold] — {td['desc']}")
-        self.console.print(f"  [dim]Saved to config[/{self.theme['text_muted']}]")
+        self.console.print(f"  [{self.theme['text_muted']}]Saved to config[/{self.theme['text_muted']}]")
     
     # Shortcut for theme
     do_t = do_theme
@@ -1004,14 +1230,14 @@ class SmartForkShell(cmd.Cmd):
                 table = Table(show_header=True)
                 table.add_column("Cluster", style=self.info_color, justify="right")
                 table.add_column("Sessions", style=self.success_color, justify="right")
-                table.add_column("Technologies", style=self.accent_color)
+                table.add_column("Top Topics", style=self.accent_color)
                 
                 for cluster in analysis['clusters'][:10]:
-                    techs = ", ".join(cluster['common_technologies'][:5])
+                    topics = ", ".join(cluster.get('common_topics', [])[:5]) if cluster.get('common_topics') else "-"
                     table.add_row(
                         str(cluster['cluster_id']),
                         str(cluster['session_count']),
-                        techs
+                        topics
                     )
                 
                 self.console.print(f"\n[bold {self.info_color}]Top Clusters:[/bold {self.info_color}]")
@@ -1503,6 +1729,8 @@ class SmartForkShell(cmd.Cmd):
                                 batch_size=self.config.batch_size
                             )
                             indexer.index_session(task_dir)
+                            # CRITICAL: Finalize to flush pending chunks immediately
+                            indexer.finalize()
                         
                         updated += 1
                         
@@ -1515,8 +1743,8 @@ class SmartForkShell(cmd.Cmd):
                             
                     except Exception as e:
                         failed += 1
-            
-            # Display results
+                
+                # Display results
             self.console.print(f"\n[bold {self.info_color}]Results:[/bold {self.info_color}]")
             self.console.print(f"  [{self.success_color}]Updated:[/{self.success_color}] {updated}")
             self.console.print(f"  [{self.warning_color}]Skipped:[/{self.warning_color}] {skipped}")
@@ -1600,6 +1828,28 @@ class SmartForkShell(cmd.Cmd):
         except Exception:
             return []
     
+    def complete_smartfork(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+        """Tab completion for smartfork command - suggest session IDs."""
+        if not self.db:
+            return []
+        
+        try:
+            sessions = self.db.get_unique_sessions()
+            return [s for s in sessions if s.startswith(text)]
+        except Exception:
+            return []
+    
+    def complete_resume(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+        """Tab completion for resume command - suggest session IDs."""
+        if not self.db:
+            return []
+        
+        try:
+            sessions = self.db.get_unique_sessions()
+            return [s for s in sessions if s.startswith(text)]
+        except Exception:
+            return []
+    
     def completedefault(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
         """Default tab completion."""
         return []
@@ -1617,7 +1867,9 @@ class SmartForkShell(cmd.Cmd):
 [bold {self.theme['text_primary']}]Core Commands:[/bold {self.theme['text_primary']}]
   search <query>           Search indexed sessions (alias: s)
   sessions [--limit N]     List all indexed sessions with IDs and titles (alias: sl)
-  fork <id|num>            Fork a session by ID or result number (alias: f)
+  fork <id|num> [q] [--smart]  Fork a session (alias: f, supports --smart with query)
+  smartfork <id> <query>   Generate smart context fork based on query
+  resume <id> <query>      Quick resume with smart fork (shortcut)
   detect-fork <q>          Find relevant sessions to fork (alias: df)
   index [--force]          Index all Kilo Code sessions (alias: i)
 

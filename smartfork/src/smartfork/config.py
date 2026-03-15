@@ -48,6 +48,42 @@ class SmartForkConfig(BaseSettings):
         description="Path to cache directory"
     )
     
+    # v2: SQLite metadata store path
+    sqlite_db_path: Path = Field(
+        default=Path.home() / ".smartfork/metadata.db",
+        description="Path to SQLite metadata database (v2)"
+    )
+    
+    # v2: Embedding configuration
+    embedding_provider: str = Field(
+        default="ollama",
+        description="Embedding provider: 'ollama', 'openai', or 'sentence-transformers'"
+    )
+    embedding_model: str = Field(
+        default="qwen3-embedding:0.6b",
+        description="Embedding model name"
+    )
+    embedding_dimensions: int = Field(
+        default=512,
+        description="Embedding vector dimensions"
+    )
+    
+    # v2: LLM configuration (for query decomposition + session summaries)
+    llm_provider: str = Field(
+        default="ollama",
+        description="LLM provider: 'ollama', 'anthropic', or 'openai'"
+    )
+    llm_model: str = Field(
+        default="qwen3:0.6b",
+        description="LLM model name for query decomposition and summaries"
+    )
+    
+    # v2: Schema version tracking
+    schema_version: int = Field(
+        default=2,
+        description="Data schema version (1=v1 original, 2=v2 structured)"
+    )
+    
     # Indexing settings
     chunk_size: int = Field(default=512, description="Size of chunks in words")
     chunk_overlap: int = Field(default=128, description="Overlap between chunks")
@@ -131,6 +167,13 @@ class SmartForkConfig(BaseSettings):
             "search_cache_size": self.search_cache_size,
             "search_cache_ttl": self.search_cache_ttl,
             "adaptive_fps": self.adaptive_fps,
+            # v2 settings
+            "embedding_provider": self.embedding_provider,
+            "embedding_model": self.embedding_model,
+            "embedding_dimensions": self.embedding_dimensions,
+            "llm_provider": self.llm_provider,
+            "llm_model": self.llm_model,
+            "schema_version": self.schema_version,
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2)
@@ -185,6 +228,19 @@ class SmartForkConfig(BaseSettings):
                     instance.search_cache_ttl = data["search_cache_ttl"]
                 if "adaptive_fps" in data:
                     instance.adaptive_fps = data["adaptive_fps"]
+                # v2 settings
+                if "embedding_provider" in data:
+                    instance.embedding_provider = data["embedding_provider"]
+                if "embedding_model" in data:
+                    instance.embedding_model = data["embedding_model"]
+                if "embedding_dimensions" in data:
+                    instance.embedding_dimensions = data["embedding_dimensions"]
+                if "llm_provider" in data:
+                    instance.llm_provider = data["llm_provider"]
+                if "llm_model" in data:
+                    instance.llm_model = data["llm_model"]
+                if "schema_version" in data:
+                    instance.schema_version = data["schema_version"]
             except (json.JSONDecodeError, ValueError, TypeError):
                 pass
         

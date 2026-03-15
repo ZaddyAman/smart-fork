@@ -151,8 +151,8 @@ class TitleGenerator:
                 task_subject = match.group(1).strip()
                 break
         
-        # Get technologies mentioned
-        technologies = self._detect_key_technologies(full_text, session.metadata.files_in_context)
+        # Get languages from file extensions
+        languages = self._detect_languages(session.metadata.files_in_context)
         
         # Build title components
         components = []
@@ -166,13 +166,13 @@ class TitleGenerator:
             subject = ' '.join(word for word in subject.split() if len(word) > 2)
             components.append(subject)
         
-        if technologies:
-            # Add primary technology
-            tech = technologies[0]
+        if languages:
+            # Add primary language
+            lang = languages[0]
             if task_type:
-                components.append(f"in {tech}")
+                components.append(f"in {lang}")
             else:
-                components.append(tech)
+                components.append(lang)
         
         # Get files context if no other info
         if not components and session.metadata.files_in_context:
@@ -199,20 +199,21 @@ class TitleGenerator:
         
         return ' '.join(components)
     
-    def _detect_key_technologies(self, text: str, files: List[str]) -> List[str]:
-        """Detect key technologies from text and file extensions.
+    def _detect_languages(self, files: List[str]) -> List[str]:
+        """Detect programming languages from file extensions only.
+        
+        This avoids false positives from text-based keyword matching.
         
         Args:
-            text: Full text content
             files: List of file paths
             
         Returns:
-            List of detected technologies
+            List of detected languages
         """
-        tech_scores: Dict[str, int] = {}
+        lang_scores: Dict[str, int] = {}
         
-        # Check file extensions
-        tech_extensions = {
+        # Check file extensions only - no text keyword matching
+        lang_extensions = {
             '.py': 'Python',
             '.js': 'JavaScript',
             '.ts': 'TypeScript',
@@ -233,51 +234,21 @@ class TitleGenerator:
             '.css': 'CSS',
             '.scss': 'SCSS',
             '.sql': 'SQL',
-            '.json': 'JSON',
-            '.yaml': 'YAML',
-            '.yml': 'YAML',
-            '.xml': 'XML',
-            '.dockerfile': 'Docker',
-            '.tf': 'Terraform',
+            '.r': 'R',
+            '.scala': 'Scala',
+            '.sh': 'Shell',
+            '.ps1': 'PowerShell',
         }
         
         for file_path in files:
             ext = Path(file_path).suffix.lower()
-            if ext in tech_extensions:
-                tech = tech_extensions[ext]
-                tech_scores[tech] = tech_scores.get(tech, 0) + 2
+            if ext in lang_extensions:
+                lang = lang_extensions[ext]
+                lang_scores[lang] = lang_scores.get(lang, 0) + 1
         
-        # Check text mentions
-        tech_keywords = {
-            'react': 'React',
-            'vue': 'Vue',
-            'angular': 'Angular',
-            'svelte': 'Svelte',
-            'nextjs': 'Next.js',
-            'django': 'Django',
-            'flask': 'Flask',
-            'fastapi': 'FastAPI',
-            'express': 'Express',
-            'spring': 'Spring',
-            'laravel': 'Laravel',
-            'rails': 'Rails',
-            'tensorflow': 'TensorFlow',
-            'pytorch': 'PyTorch',
-            'docker': 'Docker',
-            'kubernetes': 'Kubernetes',
-            'aws': 'AWS',
-            'gcp': 'GCP',
-            'azure': 'Azure',
-        }
-        
-        text_lower = text.lower()
-        for keyword, tech in tech_keywords.items():
-            if keyword in text_lower:
-                tech_scores[tech] = tech_scores.get(tech, 0) + 1
-        
-        # Sort by score
-        sorted_techs = sorted(tech_scores.items(), key=lambda x: x[1], reverse=True)
-        return [tech for tech, _ in sorted_techs[:3]]
+        # Sort by frequency
+        sorted_langs = sorted(lang_scores.items(), key=lambda x: x[1], reverse=True)
+        return [lang for lang, _ in sorted_langs[:3]]
     
     def _truncate(self, text: str, max_length: int) -> str:
         """Truncate text to max length gracefully.

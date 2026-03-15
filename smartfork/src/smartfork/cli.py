@@ -27,6 +27,7 @@ from .indexer.indexer import FullIndexer, IncrementalIndexer
 from .indexer.watcher import TranscriptWatcher
 from .search.hybrid import HybridSearchEngine
 from .fork.generator import ForkMDGenerator
+from .fork.smart_generator import SmartForkMDGenerator, ContextExtractionConfig
 from .intelligence.pre_compaction import CompactionManager
 from .intelligence.clustering import SessionClusterer
 from .intelligence.branching import BranchingTree
@@ -113,7 +114,7 @@ def main(
         try:
             start_interactive_shell()
         except Exception as e:
-            console.print(f"[{error_color}]Error starting interactive shell: {e}[/{error_color}]")
+            console.print(f"Error starting interactive shell: {str(e)}", style=error_color, markup=False)
             raise typer.Exit(1)
 
 
@@ -226,6 +227,9 @@ def index(
 
         prog.finish()
         final_stats = prog._stats
+
+    # CRITICAL: Finalize to flush any remaining pending chunks to database
+    indexer.finalize()
 
     # Completion
     total_db = 0
@@ -341,10 +345,6 @@ def search(
                 f"path:{breakdown.get('path', 0):.2f}"
             ])
             
-            # Get technologies if available
-            techs = r.metadata.get("technologies", [])
-            tech_str = f"\n[{theme['text_muted']}]Tech: {', '.join(techs[:3])}[/{theme['text_muted']}]" if techs else ""
-            
             # Get files in context
             files = r.metadata.get("files_in_context", [])
             files_str = "\n".join([f"  [{theme['text_muted']}]* {f}[/{theme['text_muted']}]" for f in files[:3]]) if files else ""
@@ -367,7 +367,7 @@ def search(
                 border = error_color
             
             panel_content = f"[bold {info_color}]Score:[/bold {info_color}] {score_pct}\n"
-            panel_content += f"[{theme['text_muted']}]{breakdown_str}[/{theme['text_muted']}]{tech_str}\n"
+            panel_content += f"[{theme['text_muted']}]{breakdown_str}[/{theme['text_muted']}]\n"
             panel_content += f"[{theme['text_muted']}]Last active: {last_active}[/{theme['text_muted']}]\n"
             if files_str:
                 panel_content += f"\n[bold {info_color}]Files:[/bold {info_color}]\n{files_str}"
@@ -471,10 +471,6 @@ def detect_fork(
             score_pct = f"{r.score:.1%}"
             breakdown = r.breakdown
             
-            # Get technologies
-            techs = r.metadata.get("technologies", [])
-            tech_str = f"\n[{theme['text_muted']}]Tech:[/{theme['text_muted']}] {', '.join(techs[:5])}" if techs else ""
-            
             # Get files
             files = r.metadata.get("files_in_context", [])
             files_preview = f"\n[{theme['text_muted']}]Files:[/{theme['text_muted']}] {', '.join(files[:3])}..." if len(files) > 3 else f"\n[{theme['text_muted']}]Files:[/{theme['text_muted']}] {', '.join(files)}" if files else ""
@@ -511,7 +507,7 @@ def detect_fork(
             id_text = f"\n[{theme['text_muted']}]ID: {r.session_id[:20]}...[/{theme['text_muted']}]" if session_title else ""
             
             console.print(Panel(
-                f"[bold {success_color}]{score_pct}[/bold {success_color}] relevance{match_str}{tech_str}{files_preview}\n\n"
+                f"[bold {success_color}]{score_pct}[/bold {success_color}] relevance{match_str}{files_preview}\n\n"
                 f"[{theme['text_muted']}]Last active: {last_active}[/{theme['text_muted']}]{id_text}",
                 title=title_text,
                 border_style=theme["panel_border"]
@@ -534,32 +530,34 @@ def fork(
     query: str = typer.Option("", "--query", "-q", help="Original search query for context"),
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file path"),
     path: Optional[Path] = typer.Option(None, "--path", "-p", help="Current working directory"),
+    smart: bool = typer.Option(False, "--smart", help="Use query-aware smart fork generation"),
+    max_tokens: int = typer.Option(2000, "--max-tokens", "-t", help="Maximum tokens in output (smart mode only)"),
 ):
     """Generate a fork.md context file from a session."""
     config = get_config()
     theme_name = getattr(config, "theme", DEFAULT_THEME)
     theme = get_theme_colors(theme_name)
     semantic = theme.get("semantic", {})
-    
+
     # Theme-aware colors
     info_color = semantic.get("info", theme["text_primary"])
     success_color = semantic.get("success", theme["done_color"])
     warning_color = semantic.get("warning", "#F59E0B")
     error_color = semantic.get("error", "#EF4444")
     accent_color = semantic.get("accent", theme["text_primary"])
-    
+
     db = ChromaDatabase(config.chroma_db_path)
-    
+
     if db.get_session_count() == 0:
         console.print(f"[{warning_color}]No sessions indexed. Run 'smartfork index' first.[/{warning_color}]")
         raise typer.Exit(1)
-    
+
     # Check if session exists
     chunks = db.get_session_chunks(session_id)
     if not chunks:
         console.print(f"[{error_color}]Session not found: {session_id}[/{error_color}]")
         raise typer.Exit(1)
-    
+
     # Get session title if available
     session_title = chunks[0].metadata.session_title if chunks else None
     if session_title:
@@ -567,23 +565,38 @@ def fork(
         console.print(f"[{theme['text_muted']}]ID: {session_id[:20]}...[/{theme['text_muted']}]")
     else:
         console.print(f"[bold {info_color}]Generating fork.md for session:[/bold {info_color}] {session_id[:20]}...")
-    
-    # Generate fork.md
-    generator = ForkMDGenerator(db)
+
+    # Use smart generator if --smart flag is set
     current_dir = str(path) if path else str(Path.cwd())
-    
-    content = generator.generate(session_id, query or "forked session", current_dir)
-    
+
+    if smart:
+        if not query:
+            console.print(f"[{error_color}]Error: --query is required when using --smart mode[/{error_color}]")
+            console.print(f"[{theme['text_muted']}]Usage: smartfork fork <session_id> --smart --query <query>[/{theme['text_muted']}]")
+            raise typer.Exit(1)
+
+        generator = SmartForkMDGenerator(db)
+        content = generator.generate(
+            session_id=session_id,
+            query=query,
+            current_dir=current_dir,
+            max_tokens=max_tokens
+        )
+        console.print(f"[{theme['text_muted']}]Using smart query-aware generation[/{theme['text_muted']}]")
+    else:
+        generator = ForkMDGenerator(db)
+        content = generator.generate(session_id, query or "forked session", current_dir)
+
     # Save to file
     if not output:
         short_id = session_id[:8]
         output = Path(f"fork_{short_id}.md")
-    
+
     output.write_text(content, encoding="utf-8")
-    
+
     console.print(f"[{success_color}]OK Fork.md saved to:[/{success_color}] {output.absolute()}")
     console.print(f"\n[{theme['text_muted']}]Preview:[/{theme['text_muted']}]\n{content[:500]}...")
-    
+
     # Show contextual help
     help_manager.show_after_command(
         UserAction.FORK,
@@ -591,6 +604,95 @@ def fork(
         session_id=session_id,
         output_file=str(output)
     )
+
+
+@app.command()
+def resume(
+    session: str = typer.Option(..., "--session", "-s", help="Session ID to resume from"),
+    query: str = typer.Option(..., "--query", "-q", help="Query describing what you want to retrieve"),
+    max_tokens: int = typer.Option(2000, "--max-tokens", "-t", help="Maximum tokens in output"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file path (optional)"),
+    path: Optional[Path] = typer.Option(None, "--path", "-p", help="Current working directory"),
+):
+    """Generate a smart context fork from a previous session for resuming work."""
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+
+    # Theme-aware colors
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    error_color = semantic.get("error", "#EF4444")
+    accent_color = semantic.get("accent", theme["text_primary"])
+
+    db = ChromaDatabase(config.chroma_db_path)
+
+    if db.get_session_count() == 0:
+        console.print(f"[{warning_color}]No sessions indexed. Run 'smartfork index' first.[/{warning_color}]")
+        raise typer.Exit(1)
+
+    # Check if session exists
+    chunks = db.get_session_chunks(session)
+    if not chunks:
+        console.print(f"[{error_color}]Session not found: {session}[/{error_color}]")
+        raise typer.Exit(1)
+
+    # Get session title if available
+    session_title = chunks[0].metadata.session_title if chunks else None
+
+    console.print(Panel.fit(
+        f"[bold {info_color}]Generating smart context fork[/bold {info_color}]\n"
+        f"Query: {query}",
+        title=f"Resume: {session_title or session[:20]}",
+        border_style=theme["panel_border"]
+    ))
+
+    # Use SmartForkMDGenerator for query-aware context extraction
+    generator = SmartForkMDGenerator(db)
+    current_dir = str(path) if path else str(Path.cwd())
+
+    with console.status(f"[bold {info_color}]Extracting relevant context..."):
+        content = generator.generate(
+            session_id=session,
+            query=query,
+            current_dir=current_dir,
+            max_tokens=max_tokens
+        )
+
+    # Calculate token savings info
+    total_chunks = len(chunks)
+    relevant_chunks = content.count("### Exchange")  # Count exchange sections
+
+    # Save or display output
+    if output:
+        output_path = generator.save(
+            session_id=session,
+            query=query,
+            output_path=output,
+            current_dir=current_dir,
+            max_tokens=max_tokens
+        )
+        console.print(f"[{success_color}]OK Smart context fork saved to:[/{success_color}] {output_path.absolute()}")
+    else:
+        # Generate default filename
+        short_id = session[:8]
+        output_path = Path(f"fork_{short_id}.md")
+        output_path.write_text(content, encoding="utf-8")
+        console.print(f"[{success_color}]OK Smart context fork saved to:[/{success_color}] {output_path.absolute()}")
+
+    # Show token efficiency info
+    console.print(f"\n[bold {info_color}]Context Summary:[/bold {info_color}]")
+    console.print(f"  [{theme['text_muted']}]Total chunks in session:[/{theme['text_muted']}] {total_chunks}")
+    console.print(f"  [{success_color}]Relevant chunks retrieved:[/{success_color}] ~{relevant_chunks}")
+    console.print(f"  [{theme['text_muted']}]Token budget:[/{theme['text_muted']}] {max_tokens}")
+
+    console.print(f"\n[{theme['text_muted']}]Preview:[/{theme['text_muted']}]")
+    console.print(Panel(
+        content[:800] + "..." if len(content) > 800 else content,
+        border_style=theme["panel_border"]
+    ))
 
 
 @app.command()
@@ -1053,14 +1155,14 @@ def cluster_analysis():
         table = Table(show_header=True)
         table.add_column("Cluster", style=info_color, justify="right")
         table.add_column("Sessions", style=success_color, justify="right")
-        table.add_column("Technologies", style=accent_color)
+        table.add_column("Top Topics", style=accent_color)
         
         for cluster in analysis['clusters'][:10]:
-            techs = ", ".join(cluster['common_technologies'][:5])
+            topics = ", ".join(cluster.get('common_topics', [])[:5]) if cluster.get('common_topics') else "-"
             table.add_row(
                 str(cluster['cluster_id']),
                 str(cluster['session_count']),
-                techs
+                topics
             )
         
         console.print(f"\n[bold {info_color}]Top Clusters:[/bold {info_color}]")
@@ -1580,12 +1682,14 @@ def update_titles(
                     # Re-index the session to store the new title
                     # Note: This requires re-indexing since ChromaDB doesn't support metadata updates
                     indexer = FullIndexer(
-                        db, 
-                        chunk_size=config.chunk_size, 
+                        db,
+                        chunk_size=config.chunk_size,
                         chunk_overlap=config.chunk_overlap,
                         batch_size=config.batch_size
                     )
                     indexer.index_session(task_dir)
+                    # CRITICAL: Finalize to flush pending chunks immediately
+                    indexer.finalize()
                     
                 updated += 1
                 
@@ -1637,6 +1741,781 @@ def interactive():
     except Exception as e:
         console.print(f"[{error_color}]Error starting interactive shell: {e}[/{error_color}]")
         raise typer.Exit(1)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v2 COMMANDS — Structured Session Intelligence Pipeline
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@app.command("index-v2")
+def index_v2(
+    force: bool = typer.Option(False, "--force", "-f", help="Force full re-index"),
+    skip_embeddings: bool = typer.Option(False, "--skip-embeddings", help="Parse + SQLite only, skip vector embeddings"),
+):
+    """Index sessions using the v2 structured pipeline.
+    
+    Parses all 3 Kilo Code files per session, extracts structured signals,
+    stores metadata in SQLite, and embeds documents into ChromaDB.
+    """
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    error_color = semantic.get("error", "#EF4444")
+
+    from .indexer.session_parser import SessionParser
+    from .indexer.session_scanner import SessionScanner
+    from .database.metadata_store import MetadataStore
+
+    if not config.kilo_code_tasks_path.exists():
+        console.print(f"[{error_color}]Tasks path not found:[/{error_color}] {config.kilo_code_tasks_path}")
+        raise typer.Exit(1)
+
+    # Initialize v2 components
+    store = MetadataStore(config.sqlite_db_path)
+    parser = SessionParser()
+    scanner = SessionScanner(config.kilo_code_tasks_path, store)
+
+    if force:
+        console.print(f"[{warning_color}]Resetting v2 index...[/{warning_color}]")
+        store.reset()
+
+    console.print(Panel.fit(
+        f"[bold {info_color}]SmartFork v2 Indexer[/bold {info_color}]\n"
+        f"Source: {config.kilo_code_tasks_path}\n"
+        f"SQLite: {config.sqlite_db_path}",
+        title="Index v2",
+        border_style=theme["panel_border"]
+    ))
+
+    # Scan for sessions
+    scan_result = scanner.scan()
+    sessions_to_index = scan_result.new_session_paths + scan_result.changed_session_paths
+
+    if not sessions_to_index:
+        console.print(f"\n[{success_color}]✓ All {scan_result.total_found} sessions up to date.[/{success_color}]")
+        store.close()
+        raise typer.Exit(0)
+
+    console.print(
+        f"\n  [{info_color}]Found:[/{info_color}] {scan_result.total_found} sessions "
+        f"({scan_result.new_sessions} new, {scan_result.changed_sessions} changed, "
+        f"{scan_result.unchanged_sessions} unchanged)"
+    )
+
+    # Initialize vector index if embeddings are enabled
+    vector_index = None
+    if not skip_embeddings:
+        try:
+            from .search.embedder import get_embedder, check_ollama_available
+            from .database.vector_index import VectorIndex
+
+            # Check Ollama availability
+            ollama_status = check_ollama_available(config.embedding_model)
+            if ollama_status["available"]:
+                embedder = get_embedder("ollama", config.embedding_model, config.embedding_dimensions)
+                console.print(f"  [{success_color}]✓ Ollama ready[/{success_color}] ({config.embedding_model})")
+            else:
+                console.print(f"  [{warning_color}]⚠ Ollama not available, using sentence-transformers fallback[/{warning_color}]")
+                console.print(f"  [{theme['text_muted']}]{ollama_status['message']}[/{theme['text_muted']}]")
+                embedder = get_embedder("sentence-transformers")
+
+            vector_index = VectorIndex(config.chroma_db_path / "v2_index", embedder)
+        except Exception as e:
+            console.print(f"  [{warning_color}]⚠ Embedding init failed: {e}[/{warning_color}]")
+            console.print(f"  [{theme['text_muted']}]Continuing with metadata-only indexing[/{theme['text_muted']}]")
+
+    # Index sessions
+    indexed = 0
+    failed = 0
+    total_vectors = {"task": 0, "summary": 0, "reasoning": 0}
+
+    from .ui.v2_progress import V2IndexProgress
+
+    embed_provider_name = ""
+    if vector_index:
+        embed_provider_name = config.embedding_model
+    
+    with V2IndexProgress(
+        total_sessions=len(sessions_to_index),
+        theme_name=theme_name,
+        console=console,
+        embedding_provider=embed_provider_name,
+        skip_embeddings=skip_embeddings or (vector_index is None),
+        animation_fps=config.get_effective_fps(),
+        disable_animation=config.disable_animations,
+    ) as prog:
+
+        for i, session_path in enumerate(sessions_to_index):
+            sid = session_path.name
+            prog.start_session(sid)
+
+            try:
+                # Step 1: Parse
+                prog.step_active("parse")
+                doc = parser.parse_session(session_path)
+
+                if doc is None:
+                    prog.step_error("parse")
+                    failed += 1
+                    prog.add_error()
+                    prog.advance()
+                    continue
+
+                prog.step_done("parse",
+                               files=len(doc.files_edited),
+                               domains=doc.domains,
+                               languages=doc.languages)
+                
+                if doc.project_name and doc.project_name != "unknown":
+                    prog.set_project(doc.project_name)
+
+                # Step 2: SQLite store
+                prog.step_active("store")
+                store.upsert_session(doc)
+                prog.step_done("store")
+
+                # Step 3: Embed
+                if vector_index:
+                    prog.step_active("embed")
+                    try:
+                        counts = vector_index.index_session(doc)
+                        for k, v in counts.items():
+                            total_vectors[k] = total_vectors.get(k, 0) + v
+                        total_chunks = sum(counts.values())
+                        prog.step_done("embed", chunks=total_chunks)
+                    except Exception as e:
+                        logger.warning(f"Vector indexing failed for {sid}: {e}")
+                        prog.step_error("embed")
+                else:
+                    prog.step_skip("embed")
+                    prog.add_chunks(1)
+
+                indexed += 1
+                prog.advance()
+
+            except Exception as e:
+                logger.error(f"Failed to index {sid}: {e}")
+                failed += 1
+                prog.add_error()
+                prog.advance()
+
+        prog.finish()
+        v2_stats = prog.stats
+
+
+    # Build BM25 index
+    try:
+        from .search.bm25_index import BM25Index
+        bm25 = BM25Index()
+        bm25_count = bm25.build_from_metadata(store)
+        console.print(f"  [{success_color}]✓ BM25 index built[/{success_color}] ({bm25_count} documents)")
+    except Exception as e:
+        console.print(f"  [{warning_color}]⚠ BM25 build failed: {e}[/{warning_color}]")
+
+    # Completion summary
+    console.print()
+    summary_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
+    summary_table.add_column("Metric", style=info_color)
+    summary_table.add_column("Value", style=success_color)
+    summary_table.add_row("Sessions indexed", str(v2_stats.indexed_sessions))
+    summary_table.add_row("Chunks created", f"{v2_stats.total_chunks:,}")
+    summary_table.add_row("Errors", str(v2_stats.errors))
+    summary_table.add_row("Total time", f"{v2_stats.elapsed:.1f}s")
+    summary_table.add_row("Total in SQLite", str(store.get_session_count()))
+    if vector_index:
+        stats = vector_index.get_stats()
+        for k, v in stats.items():
+            summary_table.add_row(f"Vector ({k})", f"{v} docs")
+    console.print(Panel(summary_table, title=f"[bold {success_color}]✓ Index Complete[/bold {success_color}]",
+                        border_style=success_color, box=box.ROUNDED))
+    console.print(f"\n  [dim {theme['text_muted']}]Run [bold]smartfork search-v2[/bold] to start searching.[/dim {theme['text_muted']}]\n")
+
+
+    store.close()
+
+
+@app.command("summarize-v2")
+def summarize_v2(
+    force: bool = typer.Option(False, "--force", "-f", help="Regenerate all summaries"),
+):
+    """Generate LLM summaries for all indexed sessions.
+    
+    Uses Ollama (qwen3:0.6b) to create 3-sentence summaries for search ranking.
+    Skips sessions that already have summaries unless --force is used.
+    """
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+
+    from .database.metadata_store import MetadataStore
+    from .search.embedder import check_ollama_available, get_embedder
+    from .intelligence.llm_provider import get_llm
+    from .intelligence.session_summarizer import SessionSummarizer
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
+
+    store = MetadataStore(config.sqlite_db_path)
+
+    if store.get_session_count() == 0:
+        console.print(f"[{warning_color}]No sessions indexed. Run 'smartfork index-v2' first.[/{warning_color}]")
+        store.close()
+        raise typer.Exit(1)
+
+    # Check Ollama
+    ollama_status = check_ollama_available(config.embedding_model)
+    if not ollama_status["available"]:
+        console.print(f"[{warning_color}]Ollama not available. Start Ollama and try again.[/{warning_color}]")
+        console.print(f"[{theme['text_muted']}]{ollama_status['message']}[/{theme['text_muted']}]")
+        store.close()
+        raise typer.Exit(1)
+
+    # Init LLM and summarizer
+    llm = get_llm("ollama")
+    summarizer = SessionSummarizer(llm=llm)
+
+    # Get all sessions
+    all_sessions = store.get_all_sessions()
+    to_summarize = [s for s in all_sessions if force or not s.summary_doc]
+
+    if not to_summarize:
+        console.print(f"[{success_color}]All {len(all_sessions)} sessions already have summaries.[/{success_color}]")
+        store.close()
+        return
+
+    console.print(f"[{info_color}]Generating summaries for {len(to_summarize)} sessions...[/{info_color}]")
+
+    generated = 0
+    errors = 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=40),
+        MofNCompleteColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Summarizing", total=len(to_summarize))
+
+        for doc in to_summarize:
+            progress.update(task, description=f"[dim]{doc.project_name}[/dim]")
+
+            try:
+                summary = summarizer.summarize(doc)
+                if summary:
+                    store.update_summary(doc.session_id, summary)
+                    generated += 1
+                else:
+                    errors += 1
+            except Exception as e:
+                logger.warning(f"Summary failed for {doc.session_id}: {e}")
+                errors += 1
+
+            progress.advance(task)
+
+    # Re-embed summaries into ChromaDB
+    console.print(f"\n[{info_color}]Re-embedding summaries into vector index...[/{info_color}]")
+    try:
+        embedder = get_embedder("ollama", config.embedding_model, config.embedding_dimensions)
+        from .database.vector_index import VectorIndex
+        from .indexer.contextual_chunker import ContextualChunker
+
+        vector_index = VectorIndex(config.chroma_db_path / "v2_index", embedder)
+        chunker = ContextualChunker()
+
+        embedded = 0
+        for doc in store.get_all_sessions():
+            if not doc.summary_doc:
+                continue
+            summary_text = chunker.build_summary_doc(doc)
+            if summary_text:
+                try:
+                    embedding = embedder.embed(summary_text, "summary_doc")
+                    # Use the vector_index's summary collection directly
+                    vector_index.summary_collection.upsert(
+                        ids=[f"{doc.session_id}_summary_0"],
+                        embeddings=[embedding],
+                        documents=[summary_text],
+                        metadatas=[{
+                            "session_id": doc.session_id,
+                            "doc_type": "summary_doc",
+                            "project_name": doc.project_name,
+                            "chunk_index": 0,
+                        }]
+                    )
+                    embedded += 1
+                except Exception as e:
+                    logger.warning(f"Failed to embed summary for {doc.session_id}: {e}")
+
+        console.print(f"  [dim]Embedded {embedded} summaries into vector index[/dim]")
+    except Exception as e:
+        console.print(f"[{warning_color}]Vector embedding of summaries failed: {e}[/{warning_color}]")
+
+    console.print(f"\n[{success_color}]✓ Summaries generated: {generated}, errors: {errors}[/{success_color}]")
+    store.close()
+
+
+
+@app.command("search-v2")
+def search_v2(
+    query: str = typer.Argument(..., help="Search query"),
+    n_results: int = typer.Option(5, "--results", "-n", help="Number of results"),
+    project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project name"),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+):
+    """Search sessions using v2 structured pipeline with result cards.
+    
+    Uses query decomposition → metadata filtering → BM25 + vector → RRF fusion.
+    """
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+
+    from .database.metadata_store import MetadataStore
+    from .search.query_decomposer import QueryDecomposer, get_vector_weights
+    from .search.bm25_index import BM25Index
+    from .search.rrf_fusion import rrf_fuse_weighted
+    from .ui.result_card import build_result_card, render_result_cards
+    from .search.embedder import check_ollama_available, get_embedder
+
+    store = MetadataStore(config.sqlite_db_path)
+
+    if store.get_session_count() == 0:
+        console.print(f"[{warning_color}]No v2 sessions indexed. Run 'smartfork index-v2' first.[/{warning_color}]")
+        store.close()
+        raise typer.Exit(1)
+
+    # Get known project names for fuzzy matching
+    known_projects = [p["project_name"] for p in store.get_project_list()]
+
+    # Step 1: Decompose query (try LLM, fallback to rule-based)
+    llm = None
+    try:
+        from .intelligence.llm_provider import get_llm
+        ollama_check = check_ollama_available(config.embedding_model)
+        if ollama_check["available"]:
+            # Use default generative model (qwen3:0.6b) for query understanding
+            llm = get_llm("ollama")
+    except Exception:
+        pass
+
+    decomposer = QueryDecomposer(llm=llm, known_projects=known_projects)
+    decomposition = decomposer.decompose(query)
+
+    decomp_method = "LLM" if llm else "rule-based"
+    console.print(f"[bold {info_color}]Query:[/bold {info_color}] {query}")
+    console.print(f"[{theme['text_muted']}]Intent: {decomposition.intent} | "
+                  f"Topic: {decomposition.topic or 'N/A'} | "
+                  f"Project: {decomposition.project or project or 'all'} | "
+                  f"Decomposer: {decomp_method}[/{theme['text_muted']}]\n")
+
+    # Step 2: Metadata filter (Signal A)
+    filter_project = project or decomposition.project
+
+    # Convert time hint to timestamp
+    time_after = None
+    if decomposition.time_hint:
+        import time as time_module
+        now = time_module.time() * 1000
+        time_map = {
+            "yesterday": now - 86400000,
+            "today": now - 43200000,
+            "last_week": now - 604800000,
+            "this_week": now - 604800000,
+            "3_days_ago": now - 259200000,
+            "last_month": now - 2592000000,
+            "this_month": now - 2592000000,
+        }
+        time_after = int(time_map.get(decomposition.time_hint, now - 604800000))
+
+    candidates = store.filter_sessions(
+        project=filter_project,
+        file_hint=decomposition.file_hint,
+        time_after=time_after,
+        limit=50,
+    )
+
+    if not candidates:
+        console.print(f"[{warning_color}]No matching sessions found.[/{warning_color}]")
+        store.close()
+        return
+
+    # Step 3: BM25 search (Signal B)
+    bm25 = BM25Index()
+    bm25.build_from_metadata(store)
+    bm25_terms = decomposition.tech_terms + ([decomposition.topic] if decomposition.topic else [])
+    bm25_results = bm25.search(bm25_terms, candidate_ids=candidates, n_results=n_results * 3)
+
+    # Step 4: Vector search (Signal C) — dimension-safe
+    vector_results_ranked = []
+    try:
+        from .database.vector_index import VectorIndex
+
+        ollama_status = check_ollama_available(config.embedding_model)
+        if ollama_status["available"]:
+            # Use Ollama (same model that built the index) — dimensions will match
+            embedder = get_embedder("ollama", config.embedding_model, config.embedding_dimensions)
+            vector_index = VectorIndex(config.chroma_db_path / "v2_index", embedder)
+            query_embedding = embedder.embed_query(query)
+
+            weights = get_vector_weights(decomposition.intent)
+            vec_results = vector_index.search_all_collections(
+                query_embedding, session_ids=candidates, n_results=n_results * 3,
+                weights=weights,
+            )
+
+            seen = set()
+            for vr in vec_results:
+                if vr.session_id not in seen:
+                    vector_results_ranked.append((vr.session_id, vr.score))
+                    seen.add(vr.session_id)
+        else:
+            # Don't use a different embedder — dimensions won't match
+            console.print(f"[{warning_color}]⚠ Ollama not running — vector search disabled (BM25 only)[/{warning_color}]")
+            console.print(f"[{theme['text_muted']}]  Start Ollama for better results[/{theme['text_muted']}]\n")
+    except Exception as e:
+        logger.warning(f"Vector search failed: {e}")
+
+    # Step 5: RRF Fusion (combine BM25 + vector rankings)
+    rankings = []
+    if bm25_results:
+        rankings.append(bm25_results)
+    if vector_results_ranked:
+        rankings.append(vector_results_ranked)
+
+    if rankings:
+        fused = rrf_fuse_weighted(rankings, top_n=n_results)
+    else:
+        # Fallback: use candidate order (most recent first)
+        fused = [(sid, 0.5) for sid in candidates[:n_results]]
+
+    # Step 6: Build result cards
+    cards = []
+    for session_id, score in fused:
+        doc = store.get_session(session_id)
+        if doc:
+            # Find best snippet
+            snippet = ""
+            if doc.reasoning_docs:
+                snippet = doc.reasoning_docs[0][:120]
+            elif doc.summary_doc:
+                snippet = doc.summary_doc[:120]
+            elif doc.task_raw:
+                snippet = doc.task_raw[:120]
+
+            # Normalize score to 0-1 range (RRF scores are small fractions)
+            normalized_score = min(score / (score + 0.01), 1.0) if score > 0 else 0.0
+            card = build_result_card(doc, match_score=normalized_score, snippet=snippet)
+            cards.append(card)
+
+    if json_output:
+        output = [{"session_id": c.session_id, "project": c.project_name,
+                    "task": c.task_short, "score": c.match_score,
+                    "files": c.files_changed} for c in cards]
+        console.print(json.dumps(output, indent=2, default=str))
+    else:
+        render_result_cards(cards, console)
+        console.print(f"\n[{theme['text_muted']}]Use [bold]smartfork fork-v2 <session_id> --intent continue|reference|debug[/bold][/{theme['text_muted']}]")
+
+    store.close()
+
+
+@app.command("fork-v2")
+def fork_v2(
+    session_id: str = typer.Argument(..., help="Session ID to fork context from"),
+    intent: str = typer.Option("continue", "--intent", "-i",
+                                help="Fork intent: continue, reference, or debug"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file path"),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Copy to clipboard"),
+):
+    """Generate intent-classified fork context from a v2-indexed session.
+    
+    Intents:
+      continue  — Resume exactly where you left off (full reasoning trail)
+      reference — Reuse the approach/decisions in new work
+      debug     — Get the error context and fix
+    """
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    error_color = semantic.get("error", "#EF4444")
+
+    from .database.metadata_store import MetadataStore
+    from .fork.fork_assembler import assemble_fork_context
+    from .mcp.mcp_server import file_drop_context, clipboard_context
+    from .search.embedder import check_ollama_available
+
+    store = MetadataStore(config.sqlite_db_path)
+    doc = store.get_session(session_id)
+
+    if not doc:
+        console.print(f"[{error_color}]Session not found in v2 index: {session_id}[/{error_color}]")
+        console.print(f"[{theme['text_muted']}]Run 'smartfork index-v2' first.[/{theme['text_muted']}]")
+        store.close()
+        raise typer.Exit(1)
+
+    # Validate intent
+    valid_intents = {"continue", "reference", "debug"}
+    if intent.lower() not in valid_intents:
+        console.print(f"[{error_color}]Invalid intent: {intent}. Use: continue, reference, or debug[/{error_color}]")
+        store.close()
+        raise typer.Exit(1)
+
+    console.print(Panel.fit(
+        f"[bold {info_color}]Forking session[/bold {info_color}]\n"
+        f"Project: {doc.project_name}\n"
+        f"Task: {doc.task_raw[:60]}{'...' if len(doc.task_raw) > 60 else ''}\n"
+        f"Intent: {intent}",
+        title=f"Fork v2 — {intent.title()}",
+        border_style=theme["panel_border"]
+    ))
+
+    # Initialize LLM for intelligent fork assembly
+    llm = None
+    try:
+        from .intelligence.llm_provider import get_llm
+        ollama_check = check_ollama_available(config.embedding_model)
+        if ollama_check["available"]:
+            llm = get_llm("ollama")
+            console.print(f"[{theme['text_muted']}]Using LLM for context distillation...[/{theme['text_muted']}]")
+        else:
+            console.print(f"[{theme['text_muted']}]Ollama not running — using cleaned raw assembly[/{theme['text_muted']}]")
+    except Exception:
+        pass
+
+    # Assemble context (LLM-powered if available, raw fallback otherwise)
+    context = assemble_fork_context(doc, intent, llm=llm)
+
+    # Deliver
+    if clipboard:
+        if clipboard_context(context):
+            console.print(f"[{success_color}]✓ Context copied to clipboard[/{success_color}]")
+        else:
+            console.print(f"[{theme['text_muted']}]Clipboard unavailable, saving to file...[/{theme['text_muted']}]")
+            clipboard = False
+
+    if output or not clipboard:
+        if not output:
+            short_id = session_id[:8]
+            output = Path(f"fork_{short_id}_{intent}.md")
+        output.write_text(context, encoding="utf-8")
+        console.print(f"[{success_color}]✓ Fork saved to:[/{success_color}] {output.absolute()}")
+
+    # Preview
+    console.print(f"\n[{theme['text_muted']}]Preview:[/{theme['text_muted']}]")
+    preview = context[:600] + ("..." if len(context) > 600 else "")
+    console.print(Panel(preview, border_style=theme["panel_border"]))
+
+    store.close()
+
+
+@app.command("status-v2")
+def status_v2():
+    """Show v2 index statistics — sessions, projects, domains, vectors."""
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+
+    from .database.metadata_store import MetadataStore
+
+    store = MetadataStore(config.sqlite_db_path)
+
+    session_count = store.get_session_count()
+    if session_count == 0:
+        console.print(f"[{warning_color}]No v2 sessions indexed. Run 'smartfork index-v2' first.[/{warning_color}]")
+        store.close()
+        raise typer.Exit(0)
+
+    projects = store.get_project_list()
+    domains = store.get_domain_breakdown()
+
+    console.print(Panel.fit(
+        f"[bold {theme['text_primary']}]SmartFork v2 Status[/bold {theme['text_primary']}]",
+        title="Status v2",
+        border_style=theme["panel_border"]
+    ))
+
+    # Main stats
+    table = Table(show_header=False, box=box.SIMPLE)
+    table.add_column("Property", style=info_color)
+    table.add_column("Value", style=success_color)
+    table.add_row("SQLite Path", str(config.sqlite_db_path))
+    table.add_row("Indexed Sessions", str(session_count))
+    table.add_row("Embedding Provider", config.embedding_provider)
+    table.add_row("Embedding Model", config.embedding_model)
+    table.add_row("LLM Provider", config.llm_provider)
+    table.add_row("Schema Version", str(config.schema_version))
+    console.print(table)
+
+    # Projects
+    if projects:
+        console.print(f"\n[bold {info_color}]Projects[/bold {info_color}]")
+        for p in projects[:10]:
+            console.print(f"  [{success_color}]{p['project_name']}[/{success_color}] — {p['session_count']} sessions")
+
+    # Domains
+    if domains:
+        console.print(f"\n[bold {info_color}]Domain Breakdown[/bold {info_color}]")
+        for domain, count in list(domains.items())[:10]:
+            bar_len = min(count * 2, 30)
+            bar = "█" * bar_len
+            console.print(f"  {domain:15s} [{success_color}]{bar}[/{success_color}] {count}")
+
+    store.close()
+
+
+@app.command("migrate-v2")
+def migrate_v2(
+    dry_run: bool = typer.Option(False, "--dry-run", "-d", help="Show what would be migrated"),
+):
+    """Migrate v1 indexed sessions to v2 structured format.
+    
+    Re-parses all sessions from the original Kilo Code files using the v2
+    structured parser, then stores them in the SQLite metadata store.
+    Existing v1 data is NOT modified.
+    """
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+    error_color = semantic.get("error", "#EF4444")
+
+    from .indexer.session_parser import SessionParser
+    from .indexer.session_scanner import SessionScanner
+    from .database.metadata_store import MetadataStore
+
+    if not config.kilo_code_tasks_path.exists():
+        console.print(f"[{error_color}]Tasks path not found:[/{error_color}] {config.kilo_code_tasks_path}")
+        raise typer.Exit(1)
+
+    store = MetadataStore(config.sqlite_db_path)
+    parser = SessionParser()
+    scanner = SessionScanner(config.kilo_code_tasks_path, store)
+
+    # Get ALL session directories
+    all_sessions = scanner.get_all_session_paths()
+
+    if not all_sessions:
+        console.print(f"[{warning_color}]No sessions found in {config.kilo_code_tasks_path}[/{warning_color}]")
+        store.close()
+        raise typer.Exit(0)
+
+    console.print(Panel.fit(
+        f"[bold {info_color}]SmartFork v1 → v2 Migration[/bold {info_color}]\n"
+        f"Source: {config.kilo_code_tasks_path}\n"
+        f"Sessions found: {len(all_sessions)}\n"
+        f"Already in v2: {store.get_session_count()}",
+        title="Migrate v2",
+        border_style=theme["panel_border"]
+    ))
+
+    if dry_run:
+        console.print(f"\n[{warning_color}]DRY RUN — no changes will be made[/{warning_color}]")
+        for i, path in enumerate(all_sessions[:20], 1):
+            console.print(f"  {i}. {path.name}")
+        if len(all_sessions) > 20:
+            console.print(f"  ... and {len(all_sessions) - 20} more")
+        store.close()
+        return
+
+    migrated = 0
+    failed = 0
+
+    with console.status(f"[bold {info_color}]Migrating {len(all_sessions)} sessions...") as status:
+        for i, session_path in enumerate(all_sessions):
+            sid = session_path.name
+            status.update(f"[bold {info_color}]Migrating [{i+1}/{len(all_sessions)}] {sid}...")
+
+            try:
+                doc = parser.parse_session(session_path)
+                if doc:
+                    store.upsert_session(doc)
+                    migrated += 1
+                else:
+                    failed += 1
+            except Exception as e:
+                logger.error(f"Migration failed for {sid}: {e}")
+                failed += 1
+
+    console.print(f"\n[bold {success_color}]Migration Complete[/bold {success_color}]")
+    console.print(f"  [{success_color}]✓ Migrated:[/{success_color}] {migrated}")
+    console.print(f"  [{warning_color if failed else theme['text_muted']}]✗ Failed:[/{warning_color if failed else theme['text_muted']}] {failed}")
+    console.print(f"  [{info_color}]Total in v2 store:[/{info_color}] {store.get_session_count()}")
+
+    store.close()
+
+
+@app.command("mcp-server")
+def mcp_server_cmd():
+    """Start the SmartFork MCP server for Kilo Code integration.
+    
+    Exposes SmartFork tools (search, fork, detect-fork, status) via MCP
+    for direct IDE integration.
+    """
+    config = get_config()
+    theme_name = getattr(config, "theme", DEFAULT_THEME)
+    theme = get_theme_colors(theme_name)
+    semantic = theme.get("semantic", {})
+    info_color = semantic.get("info", theme["text_primary"])
+    success_color = semantic.get("success", theme["done_color"])
+    warning_color = semantic.get("warning", "#F59E0B")
+
+    from .database.metadata_store import MetadataStore
+    from .mcp.mcp_server import SmartForkMCPServer
+
+    store = MetadataStore(config.sqlite_db_path)
+
+    if store.get_session_count() == 0:
+        console.print(f"[{warning_color}]No v2 sessions indexed. Run 'smartfork index-v2' first.[/{warning_color}]")
+        store.close()
+        raise typer.Exit(1)
+
+    server = SmartForkMCPServer(metadata_store=store)
+    tools = server.get_tool_definitions()
+
+    console.print(Panel.fit(
+        f"[bold {info_color}]SmartFork MCP Server[/bold {info_color}]\n"
+        f"Sessions: {store.get_session_count()}\n"
+        f"Tools: {', '.join(t['name'] for t in tools)}",
+        title="MCP Server",
+        border_style=theme["panel_border"]
+    ))
+
+    console.print(f"\n[{theme['text_muted']}]MCP server is ready. Tools registered:[/{theme['text_muted']}]")
+    for tool in tools:
+        console.print(f"  [{success_color}]•[/{success_color}] {tool['name']} — {tool['description'][:60]}")
+
+    console.print(f"\n[{theme['text_muted']}]To connect from Kilo Code, add SmartFork as an MCP server in your settings.[/{theme['text_muted']}]")
+    console.print(f"[{theme['text_muted']}]Press Ctrl+C to stop.[/{theme['text_muted']}]")
+
+    try:
+        import time as time_module
+        while True:
+            time_module.sleep(1)
+    except KeyboardInterrupt:
+        console.print(f"\n[{theme['text_muted']}]MCP server stopped.[/{theme['text_muted']}]")
+        store.close()
 
 
 if __name__ == "__main__":

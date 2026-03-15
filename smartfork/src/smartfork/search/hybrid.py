@@ -335,7 +335,6 @@ class HybridSearchEngine:
                     # Cache metadata
                     self._session_metadata[session_id] = {
                         "files_in_context": chunks[0].metadata.files_in_context,
-                        "technologies": chunks[0].metadata.technologies,
                         "last_active": chunks[0].metadata.last_active
                     }
             
@@ -487,7 +486,6 @@ class HybridSearchEngine:
             if chunks:
                 self._session_metadata[session_id] = {
                     "files_in_context": chunks[0].metadata.files_in_context,
-                    "technologies": chunks[0].metadata.technologies,
                     "last_active": chunks[0].metadata.last_active
                 }
             else:

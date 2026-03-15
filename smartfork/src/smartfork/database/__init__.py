@@ -1,10 +1,31 @@
 """Database module for SmartFork."""
 
-from .chroma_db import ChromaDatabase, Chunk, ChunkMetadata
-from .models import TaskMetadata, ConversationMessage, UIMessage, TaskSession, SearchResult, IndexingResult
+# Backward compatibility: Chunk and ChunkMetadata are now aliases for Enhanced versions
+from .chroma_db import ChromaDatabase
+from .models import (
+    TaskMetadata, ConversationMessage, UIMessage, TaskSession,
+    SearchResult, IndexingResult
+)
+
+# New enhanced chunk models (with backward compatibility)
+from .chunk_models import (
+    EnhancedChunk, EnhancedChunkMetadata,
+    Chunk, ChunkMetadata,  # Aliases for backward compatibility
+    MessageRange, ChunkContentType, ChunkSearchResult, TokenBudget
+)
 
 __all__ = [
-    "ChromaDatabase", "Chunk", "ChunkMetadata",
-    "TaskMetadata", "ConversationMessage", "UIMessage", 
+    # Core database
+    "ChromaDatabase",
+    
+    # Enhanced chunk models (new)
+    "EnhancedChunk", "EnhancedChunkMetadata",
+    "MessageRange", "ChunkContentType", "ChunkSearchResult", "TokenBudget",
+    
+    # Backward compatibility aliases
+    "Chunk", "ChunkMetadata",
+    
+    # Legacy models
+    "TaskMetadata", "ConversationMessage", "UIMessage",
     "TaskSession", "SearchResult", "IndexingResult"
 ]

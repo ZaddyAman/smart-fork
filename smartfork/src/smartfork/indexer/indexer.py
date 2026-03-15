@@ -6,13 +6,15 @@ from tqdm import tqdm
 from loguru import logger
 
 from ..database.chroma_db import ChromaDatabase
-from ..database.models import TaskSession, Chunk, ChunkMetadata, IndexingResult
+from ..database.models import TaskSession, IndexingResult
+from ..database.chunk_models import EnhancedChunk, EnhancedChunkMetadata
 from .parser import KiloCodeParser
+from .chunkers import MessageBoundaryChunker, ChunkingConfig
 from ..intelligence.titling import TitleGenerator, TitleManager
 
 
 class FullIndexer:
-    """Performs full re-indexing of sessions."""
+    """Performs full re-indexing of sessions with message-aware chunking."""
     
     def __init__(
         self,
@@ -20,25 +22,35 @@ class FullIndexer:
         chunk_size: int = 512,
         chunk_overlap: int = 128,
         generate_titles: bool = True,
-        batch_size: int = 100
+        batch_size: int = 100,
+        chunking_strategy: str = "message_boundary"
     ):
         """Initialize the indexer.
         
         Args:
             db: ChromaDatabase instance
             chunk_size: Size of chunks in tokens/words
-            chunk_overlap: Overlap between chunks
+            chunk_overlap: Overlap between chunks (legacy, not used with message chunking)
             generate_titles: Whether to auto-generate session titles
             batch_size: Batch size for database operations
+            chunking_strategy: Chunking strategy to use ("message_boundary" or "code_aware")
         """
         self.db = db
         self.parser = KiloCodeParser()
         self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
+        self.chunk_overlap = chunk_overlap  # Legacy, kept for compatibility
         self.generate_titles = generate_titles
         self.batch_size = batch_size
         self.title_manager = TitleManager(db) if generate_titles else None
-        self._pending_chunks: List = []  # Buffer for batching
+        self._pending_chunks: List[EnhancedChunk] = []  # Buffer for batching
+        
+        # Initialize the new message-aware chunker
+        chunking_config = ChunkingConfig(
+            max_tokens_per_chunk=chunk_size,
+            extract_keywords=True,
+            extract_files=True
+        )
+        self.chunker = MessageBoundaryChunker(chunking_config)
     
     def index_all_sessions(self, tasks_path: Path, progress: bool = True) -> IndexingResult:
         """Index all sessions in the tasks directory.
@@ -134,104 +146,51 @@ class FullIndexer:
         """Finalize indexing by flushing any remaining pending chunks."""
         self._flush_pending_chunks()
     
-    def _create_chunks(self, session: TaskSession) -> List[Chunk]:
-        """Create chunks from session conversation.
+    def _create_chunks(self, session: TaskSession) -> List[EnhancedChunk]:
+        """
+        Create chunks from session conversation using message-aware chunking.
+        
+        Uses MessageBoundaryChunker which:
+        - Preserves message boundaries (never splits messages)
+        - Tracks files mentioned per chunk
+        - Classifies content type (code/text/mixed)
+        - Extracts keywords and entities
         
         Args:
             session: TaskSession to chunk
             
         Returns:
-            List of Chunk objects
+            List of EnhancedChunk objects with rich metadata
         """
-        chunks = []
-        full_text = session.get_full_text()
+        # Use the new message-aware chunker
+        chunks = self.chunker.chunk_session(session)
         
-        if not full_text.strip():
-            return chunks
-        
-        # Simple word-based chunking strategy
-        text_chunks = self._split_text(full_text, self.chunk_size, self.chunk_overlap)
-        
-        # Detect technologies in the full text
-        technologies = self.parser.detect_technologies(full_text)
-        
-        # Get last active timestamp
-        last_timestamp = session.get_last_timestamp()
-        last_active = None
-        if last_timestamp:
-            from datetime import datetime
-            last_active = datetime.fromtimestamp(last_timestamp / 1000).isoformat()
-        
-        # Generate session title if enabled
-        session_title = None
-        if self.title_manager:
+        # Add session title if generation is enabled
+        if self.title_manager and chunks:
             session_title = self.title_manager.generate_and_store_title(session)
-        
-        for idx, text in enumerate(text_chunks):
-            chunk_id = f"{session.task_id}_{idx}"
-            chunks.append(Chunk(
-                id=chunk_id,
-                content=text,
-                metadata=ChunkMetadata(
-                    session_id=session.task_id,
-                    task_id=session.task_id,
-                    chunk_index=idx,
-                    files_in_context=session.metadata.files_in_context,
-                    message_type="mixed",
-                    technologies=technologies,
-                    last_active=last_active,
-                    session_title=session_title
-                )
-            ))
+            for chunk in chunks:
+                chunk.metadata.session_title = session_title
         
         return chunks
     
-    def _split_text(self, text: str, chunk_size: int, overlap: int) -> List[str]:
-        """Split text into overlapping chunks.
-        
-        Args:
-            text: Text to split
-            chunk_size: Target chunk size in words
-            overlap: Number of words to overlap
-            
-        Returns:
-            List of text chunks
-        """
-        words = text.split()
-        
-        if len(words) <= chunk_size:
-            return [text] if text.strip() else []
-        
-        chunks = []
-        start = 0
-        
-        while start < len(words):
-            end = min(start + chunk_size, len(words))
-            chunk = ' '.join(words[start:end])
-            chunks.append(chunk)
-            
-            # Move forward with overlap
-            start += chunk_size - overlap
-            
-            # Avoid infinite loop on small chunks
-            if start >= end:
-                break
-        
-        return chunks
+    # Note: _split_text method removed - using MessageBoundaryChunker instead
+    # The old word-based splitting is replaced with message-aware chunking
+    # which preserves conversation structure and tracks per-chunk metadata
 
 
 class IncrementalIndexer:
     """Performs incremental indexing of new/changed sessions."""
     
-    def __init__(self, db: ChromaDatabase):
+    def __init__(self, db: ChromaDatabase, chunk_size: int = 512):
         """Initialize the incremental indexer.
         
         Args:
             db: ChromaDatabase instance
+            chunk_size: Maximum tokens per chunk for new sessions
         """
         self.db = db
         self.parser = KiloCodeParser()
-        self.full_indexer = FullIndexer(db)
+        self.full_indexer = FullIndexer(db, chunk_size=chunk_size)
     
     def on_session_changed(self, session_id: str, session_path: Path) -> bool:
         """Handle a session change event.

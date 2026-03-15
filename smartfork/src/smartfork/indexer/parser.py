@@ -12,40 +12,7 @@ from ..database.models import TaskSession, TaskMetadata, ConversationMessage, UI
 class KiloCodeParser:
     """Parses Kilo Code transcript files from task directories."""
     
-    # Technology detection patterns
-    TECH_PATTERNS = {
-        'FastAPI': [r'fastapi', r'from fastapi', r'import fastapi'],
-        'Django': [r'django', r'from django', r'import django'],
-        'Flask': [r'flask', r'from flask', r'import flask'],
-        'React': [r'react', r'import.*react', r'from.*react'],
-        'Vue': [r'vue', r'import.*vue', r'from.*vue'],
-        'Angular': [r'angular', r'@angular'],
-        'PostgreSQL': [r'postgres', r'postgresql', r'psycopg', r'asyncpg'],
-        'MySQL': [r'mysql', r'pymysql', r'mysql-connector'],
-        'MongoDB': [r'mongodb', r'pymongo', r'mongoose'],
-        'Redis': [r'redis', r'aioredis'],
-        'Docker': [r'docker', r'dockerfile', r'docker-compose'],
-        'Kubernetes': [r'kubernetes', r'k8s', r'kubectl'],
-        'JWT': [r'jwt', r'json.?web.?token', r'pyjwt', r'jose'],
-        'OAuth': [r'oauth', r'oauth2'],
-        'GraphQL': [r'graphql', r'graphene', r'apollo'],
-        'REST': [r'rest.?api', r'restful'],
-        'gRPC': [r'grpc'],
-        'WebSocket': [r'websocket', r'websockets', r'socket\.io'],
-        'Celery': [r'celery'],
-        'RabbitMQ': [r'rabbitmq', r'pika'],
-        'Kafka': [r'kafka', r'confluent-kafka'],
-        'Elasticsearch': [r'elasticsearch', r'elasticsearch-dsl'],
-        'Pandas': [r'pandas', r'pd\.'],
-        'NumPy': [r'numpy', r'np\.'],
-        'TensorFlow': [r'tensorflow', r'tf\.'],
-        'PyTorch': [r'torch', r'pytorch'],
-        'Scikit-learn': [r'sklearn', r'scikit-learn'],
-        'OpenAI': [r'openai', r'chatgpt', r'gpt-'],
-        'Anthropic': [r'anthropic', r'claude'],
-        'LangChain': [r'langchain'],
-        'HuggingFace': [r'huggingface', r'transformers'],
-    }
+
     
     def parse_task_directory(self, task_path: Path) -> Optional[TaskSession]:
         """Parse a Kilo Code task directory.
@@ -167,22 +134,17 @@ class KiloCodeParser:
     def detect_technologies(self, text: str) -> List[str]:
         """Detect technologies mentioned in the text.
         
+        Note: Technology detection has been disabled to prevent false positives.
+        This method now returns an empty list for compatibility.
+        
         Args:
             text: Text to analyze
             
         Returns:
-            List of detected technology names
+            Empty list (feature disabled)
         """
-        text_lower = text.lower()
-        detected = []
-        
-        for tech, patterns in self.TECH_PATTERNS.items():
-            for pattern in patterns:
-                if re.search(pattern, text_lower):
-                    detected.append(tech)
-                    break
-        
-        return detected
+        # Technology detection disabled - returning empty list
+        return []
     
     def extract_file_paths(self, text: str) -> List[str]:
         """Extract file paths mentioned in the text.

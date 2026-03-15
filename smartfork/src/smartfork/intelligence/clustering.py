@@ -156,9 +156,9 @@ class SemanticClustering:
         
     def get_cluster_summary(self, cluster_id: int, session_ids: List[str]) -> Dict:
         """Generate summary for a cluster."""
-        # Get common technologies
-        all_techs = set()
+        # Get common files and extract topics
         all_files = set()
+        all_extensions = set()
         
         for session_id in session_ids[:5]:  # Sample first 5
             try:
@@ -168,19 +168,33 @@ class SemanticClustering:
                 )
                 
                 for meta in results["metadatas"]:
-                    techs = json.loads(meta.get("technologies", "[]"))
-                    all_techs.update(techs)
-                    
                     files = json.loads(meta.get("files_in_context", "[]"))
                     all_files.update(files)
+                    # Extract file extensions as topic hints
+                    for f in files:
+                        if '.' in f:
+                            ext = f.split('.')[-1].lower()
+                            if ext in ['py', 'js', 'ts', 'tsx', 'jsx', 'java', 'go', 'rs', 'cpp', 'c', 'h']:
+                                all_extensions.add(ext)
                     
             except Exception:
                 continue
+        
+        # Use file extensions and common files as topics
+        topics = list(all_extensions)[:5]
+        if len(topics) < 3:
+            # Add some common file names as topics
+            for f in list(all_files)[:5]:
+                name = f.split('/')[-1].split('.')[0]
+                if name and name not in topics:
+                    topics.append(name)
+                    if len(topics) >= 5:
+                        break
                 
         return {
             "cluster_id": cluster_id,
             "session_count": len(session_ids),
-            "common_technologies": list(all_techs)[:10],
+            "common_topics": topics[:5],
             "common_files": list(all_files)[:10],
             "sample_sessions": session_ids[:3]
         }

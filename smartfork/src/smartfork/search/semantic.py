@@ -20,10 +20,9 @@ class SemanticSearchEngine:
         self.db = db
     
     def search(
-        self, 
-        query: str, 
+        self,
+        query: str,
         n_results: int = 10,
-        technologies: Optional[List[str]] = None,
         files: Optional[List[str]] = None
     ) -> List[SearchResult]:
         """Search for sessions matching the query.
@@ -31,14 +30,13 @@ class SemanticSearchEngine:
         Args:
             query: Search query text
             n_results: Number of results to return
-            technologies: Filter by technologies mentioned
             files: Filter by files in context
             
         Returns:
             List of SearchResult objects
         """
         # Build filter conditions
-        where = self._build_filter(technologies, files)
+        where = self._build_filter(files)
         
         # Search database using ChromaDB's built-in embedding
         results = self.db.search_by_text(query, n_results, where)
@@ -89,35 +87,18 @@ class SemanticSearchEngine:
     
     def _build_filter(
         self,
-        technologies: Optional[List[str]],
         files: Optional[List[str]]
     ) -> Optional[dict]:
         """Build ChromaDB filter conditions.
         
         Args:
-            technologies: Technologies to filter by
             files: Files to filter by
             
         Returns:
             Filter dict or None
         """
-        conditions = []
-        
-        if technologies:
-            # Check if any of the specified technologies are in the metadata
-            conditions.append({
-                "technologies": {"$in": technologies}
-            })
-        
         if files:
             # Check if any of the specified files are in context
-            conditions.append({
-                "files_in_context": {"$in": files}
-            })
+            return {"files_in_context": {"$in": files}}
         
-        if len(conditions) == 0:
-            return None
-        elif len(conditions) == 1:
-            return conditions[0]
-        else:
-            return {"$and": conditions}
+        return None

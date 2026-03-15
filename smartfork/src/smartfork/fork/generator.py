@@ -63,7 +63,6 @@ class SessionAnalyzer:
             "dependencies": list(set(dependencies))[:10],  # Unique deps
             "next_steps": next_steps[:5],  # Top 5 next steps
             "date_range": date_range,
-            "technologies": chunks[0].metadata.technologies if chunks else [],
             "files_in_context": chunks[0].metadata.files_in_context if chunks else []
         }
     
@@ -109,10 +108,31 @@ class SessionAnalyzer:
     
     def _identify_topics(self, chunks: List[Chunk]) -> List[str]:
         """Identify key topics from chunks."""
-        # Use technologies as topics
+        # Extract topics from file names and extensions
         topics = set()
+        file_extensions = {
+            'py': 'Python', 'js': 'JavaScript', 'ts': 'TypeScript',
+            'tsx': 'React/TSX', 'jsx': 'React/JSX', 'java': 'Java',
+            'go': 'Go', 'rs': 'Rust', 'cpp': 'C++', 'c': 'C',
+            'h': 'Header', 'hpp': 'C++ Header', 'cs': 'C#',
+            'rb': 'Ruby', 'php': 'PHP', 'swift': 'Swift',
+            'kt': 'Kotlin', 'scala': 'Scala', 'r': 'R',
+            'md': 'Markdown', 'json': 'JSON', 'yaml': 'YAML',
+            'yml': 'YAML', 'toml': 'TOML', 'ini': 'Config',
+            'sql': 'SQL', 'sh': 'Shell', 'ps1': 'PowerShell',
+            'dockerfile': 'Docker', 'tf': 'Terraform'
+        }
+        
         for chunk in chunks:
-            topics.update(chunk.metadata.technologies)
+            for file_path in chunk.metadata.files_in_context:
+                # Get file extension
+                ext = file_path.split('.')[-1].lower() if '.' in file_path else ''
+                if ext in file_extensions:
+                    topics.add(file_extensions[ext])
+                # Get file name (last part of path)
+                file_name = file_path.split('/')[-1].split('.')[0]
+                if file_name and file_name not in ['__init__', 'index', 'main', 'app']:
+                    topics.add(file_name)
         
         return list(topics)[:10]
     
@@ -187,7 +207,7 @@ class ForkMDGenerator:
         start = date_range.get("start", "Unknown")
         end = date_range.get("end", "Unknown")
         
-        techs = ", ".join(analysis.get("technologies", [])[:5]) or "None identified"
+        topics = ", ".join(analysis.get("key_topics", [])[:5]) or "None identified"
         files_count = len(analysis.get("files_in_context", []))
         
         return f"""# Context Fork: Session {session_id}
@@ -196,7 +216,7 @@ class ForkMDGenerator:
 - **Session ID**: {session_id}
 - **Date Range**: {start} to {end}
 - **Files Discussed**: {files_count} files
-- **Key Technologies**: {techs}"""
+- **Key Topics**: {topics}"""
     
     def _generate_summary(self, analysis: Dict[str, Any]) -> str:
         """Generate context summary."""
@@ -292,7 +312,7 @@ class ForkMDGenerator:
         
         return f"""## How This Relates to Your Current Work
 - **Current Query**: "{query}"
-- **Technologies Match**: {len(analysis.get('technologies', []))} technologies identified{overlap_note}
+- **Topics Match**: {len(analysis.get('key_topics', []))} topics identified{overlap_note}
 
 ---
 

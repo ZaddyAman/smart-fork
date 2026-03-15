@@ -1,12 +1,15 @@
 """ChromaDB integration for SmartFork."""
 
 import chromadb
+import json
 from chromadb.config import Settings
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from loguru import logger
 
-from .models import Chunk, ChunkMetadata, SearchResult
+# Support both old and new chunk models
+from .models import SearchResult
+from .chunk_models import EnhancedChunk, EnhancedChunkMetadata, Chunk, ChunkMetadata
 
 # Default batch size for operations
 DEFAULT_BATCH_SIZE = 100
@@ -42,15 +45,13 @@ class ChromaDatabase:
             metadata={"hnsw:space": "cosine"}
         )
     
-    def add_chunks(self, chunks: List[Chunk], batch_size: int = DEFAULT_BATCH_SIZE) -> None:
+    def add_chunks(self, chunks: List[EnhancedChunk], batch_size: int = DEFAULT_BATCH_SIZE) -> None:
         """Add conversation chunks to the database with batching support.
         
         Args:
-            chunks: List of Chunk objects to add
+            chunks: List of EnhancedChunk objects to add
             batch_size: Number of chunks to add in each batch (default: 100)
         """
-        import json
-        
         if not chunks:
             return
         
@@ -67,20 +68,11 @@ class ChromaDatabase:
             documents = [chunk.content for chunk in batch]
             embeddings = [chunk.embedding for chunk in batch if chunk.embedding]
             
-            # Convert metadata to ChromaDB-compatible format (no lists, no None values)
+            # Convert metadata to ChromaDB-compatible format
             metadatas = []
             for chunk in batch:
-                meta = chunk.metadata.model_dump()
-                # Convert lists to JSON strings and remove None values
-                cleaned_meta = {}
-                for key, value in meta.items():
-                    if value is None:
-                        continue  # Skip None values
-                    elif isinstance(value, list):
-                        cleaned_meta[key] = json.dumps(value)
-                    else:
-                        cleaned_meta[key] = value
-                metadatas.append(cleaned_meta)
+                meta = self._serialize_metadata(chunk.metadata)
+                metadatas.append(meta)
             
             # If no embeddings provided, ChromaDB will generate them
             if embeddings and len(embeddings) == len(batch):
@@ -101,6 +93,46 @@ class ChromaDatabase:
             logger.debug(f"Added batch of {len(batch)} chunks ({total_added}/{len(chunks)})")
         
         logger.debug(f"Added {total_added} chunks to database in {len(chunks) // batch_size + 1} batches")
+    
+    def _serialize_metadata(self, metadata: EnhancedChunkMetadata) -> Dict[str, Any]:
+        """
+        Serialize EnhancedChunkMetadata for ChromaDB storage.
+        
+        ChromaDB doesn't support nested objects or None values, so we:
+        1. Convert nested objects (MessageRange) to flat fields
+        2. Serialize lists to JSON strings
+        3. Remove None values
+        4. Ensure all values are ChromaDB-compatible types
+        """
+        # Get base metadata as dict
+        meta_dict = metadata.model_dump()
+        
+        cleaned_meta = {}
+        
+        for key, value in meta_dict.items():
+            # Skip None values
+            if value is None:
+                continue
+            
+            # Handle MessageRange - flatten to separate fields
+            if key == "message_range" and isinstance(value, dict):
+                for sub_key, sub_value in value.items():
+                    if sub_value is not None:
+                        flat_key = f"msg_range_{sub_key}"
+                        cleaned_meta[flat_key] = sub_value
+                continue
+            
+            # Serialize lists to JSON
+            if isinstance(value, list):
+                cleaned_meta[key] = json.dumps(value)
+            # Serialize dicts to JSON
+            elif isinstance(value, dict):
+                cleaned_meta[key] = json.dumps(value)
+            # Keep primitives as-is
+            else:
+                cleaned_meta[key] = value
+        
+        return cleaned_meta
     
     def search(
         self, 
@@ -189,17 +221,15 @@ class ChromaDatabase:
         )
         logger.debug(f"Deleted session {session_id}")
     
-    def get_session_chunks(self, session_id: str) -> List[Chunk]:
+    def get_session_chunks(self, session_id: str) -> List[EnhancedChunk]:
         """Get all chunks for a specific session.
         
         Args:
             session_id: Session ID to retrieve
             
         Returns:
-            List of Chunk objects
+            List of EnhancedChunk objects
         """
-        import json
-        
         results = self.collection.get(
             where={"session_id": session_id},
             include=["documents", "metadatas"]
@@ -209,21 +239,56 @@ class ChromaDatabase:
         if results and results.get('ids'):
             for i, chunk_id in enumerate(results['ids']):
                 meta_dict = results['metadatas'][i]
-                # Deserialize JSON strings back to lists
-                for key, value in meta_dict.items():
-                    if isinstance(value, str) and value.startswith('['):
-                        try:
-                            meta_dict[key] = json.loads(value)
-                        except json.JSONDecodeError:
-                            pass
-                metadata = ChunkMetadata(**meta_dict)
-                chunks.append(Chunk(
+                # Deserialize metadata
+                metadata = self._deserialize_metadata(meta_dict)
+                chunks.append(EnhancedChunk(
                     id=chunk_id,
                     content=results['documents'][i],
                     metadata=metadata
                 ))
         
         return chunks
+    
+    def _deserialize_metadata(self, meta_dict: Dict[str, Any]) -> EnhancedChunkMetadata:
+        """
+        Deserialize metadata from ChromaDB format back to EnhancedChunkMetadata.
+        
+        Reconstructs:
+        1. MessageRange from flattened fields
+        2. Lists from JSON strings
+        3. Nested objects from JSON strings
+        """
+        # Reconstruct MessageRange from flattened fields
+        message_range = None
+        msg_range_keys = [k for k in meta_dict.keys() if k.startswith('msg_range_')]
+        if msg_range_keys:
+            range_dict = {}
+            for key in msg_range_keys:
+                sub_key = key.replace('msg_range_', '')
+                range_dict[sub_key] = meta_dict.pop(key)
+            from .chunk_models import MessageRange
+            message_range = MessageRange(**range_dict)
+        
+        # Deserialize JSON strings back to lists/objects
+        for key, value in list(meta_dict.items()):
+            if isinstance(value, str):
+                # Try to parse as JSON
+                if value.startswith('[') or value.startswith('{'):
+                    try:
+                        meta_dict[key] = json.loads(value)
+                    except json.JSONDecodeError:
+                        pass  # Keep as string if not valid JSON
+        
+        # Add message_range back to metadata dict
+        if message_range:
+            meta_dict['message_range'] = message_range
+        
+        # Create EnhancedChunkMetadata
+        # Filter out any extra fields that might cause validation errors
+        valid_fields = EnhancedChunkMetadata.model_fields.keys()
+        filtered_dict = {k: v for k, v in meta_dict.items() if k in valid_fields}
+        
+        return EnhancedChunkMetadata(**filtered_dict)
     
     def get_session_count(self) -> int:
         """Get total number of indexed chunks."""

@@ -2,6 +2,26 @@
 
 from .parser import KiloCodeParser
 from .watcher import TranscriptWatcher
-from .indexer import FullIndexer
+from .indexer import FullIndexer, IncrementalIndexer
 
-__all__ = ["KiloCodeParser", "TranscriptWatcher", "FullIndexer"]
+# New message-aware chunkers
+from .chunkers import (
+    MessageBoundaryChunker,
+    CodeAwareChunker,
+    ChunkingConfig,
+    create_chunker
+)
+
+__all__ = [
+    # Core components
+    "KiloCodeParser",
+    "TranscriptWatcher",
+    "FullIndexer",
+    "IncrementalIndexer",
+    
+    # New chunking strategies
+    "MessageBoundaryChunker",
+    "CodeAwareChunker",
+    "ChunkingConfig",
+    "create_chunker",
+]
