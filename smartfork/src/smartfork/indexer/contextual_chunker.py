@@ -95,20 +95,19 @@ class ContextualChunker:
         header = self.build_context_header(doc)
         return f"{header}\n\n{doc.summary_doc}"
     
-    def build_reasoning_docs(self, doc: SessionDocument) -> List[str]:
+    def build_reasoning_docs(self, doc: SessionDocument) -> List[dict]:
         """Build contextually-prefixed reasoning documents for embedding.
         
         For each reasoning block:
         1. Prepend context header
         2. If block > MAX_REASONING_TOKENS: split at sentence boundaries
-           with OVERLAP_SENTENCES sentence overlap
-        3. Each split chunk gets its own context header
+        3. Assign parent_id to link child chunks to full parent raw text
         
         Args:
             doc: SessionDocument with reasoning_docs populated
         
         Returns:
-            List of context-prefixed reasoning chunks ready for embedding
+            List of dicts: {"id": str, "parent_id": str, "text": str, "full_raw_text": str, "chunk_index": int}
         """
         if not doc.reasoning_docs:
             return []
@@ -116,21 +115,34 @@ class ContextualChunker:
         header = self.build_context_header(doc)
         result = []
         
-        for block in doc.reasoning_docs:
+        for chunk_idx, block in enumerate(doc.reasoning_docs):
             block = block.strip()
             if not block:
                 continue
             
+            parent_id = f"{doc.session_id}_parent_{chunk_idx}"
             estimated_tokens = self._estimate_tokens(block)
             
             if estimated_tokens <= self.MAX_REASONING_TOKENS:
                 # Short enough — embed as-is with header
-                result.append(f"{header}\n\n{block}")
+                result.append({
+                    "id": f"{doc.session_id}_reasoning_{chunk_idx}",
+                    "parent_id": parent_id,
+                    "text": f"{header}\n\n{block}",
+                    "full_raw_text": block,
+                    "chunk_index": chunk_idx
+                })
             else:
                 # Too long — split at sentence boundaries
                 chunks = self._split_at_sentences(block)
-                for chunk in chunks:
-                    result.append(f"{header}\n\n{chunk}")
+                for child_idx, chunk in enumerate(chunks):
+                    result.append({
+                        "id": f"{doc.session_id}_reasoning_{chunk_idx}_{child_idx}",
+                        "parent_id": parent_id,
+                        "text": f"{header}\n\n{chunk}",
+                        "full_raw_text": block,
+                        "chunk_index": chunk_idx
+                    })
         
         return result
     

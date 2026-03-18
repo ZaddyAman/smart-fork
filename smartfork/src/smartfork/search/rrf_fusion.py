@@ -88,3 +88,58 @@ def rrf_fuse_weighted(rankings: List[List[Tuple[str, float]]],
     
     sorted_results = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
     return sorted_results[:top_n]
+
+
+ALPHA_MAP = {
+    "error_recall":          0.75,  # Needs exact error strings -> BM25
+    "implementation_lookup": 0.50,  # Balanced
+    "decision_hunting":      0.20,  # Needs architectural concepts -> Vector
+    "pattern_hunting":       0.60,  # Code patterns lean toward exact match -> BM25
+    "temporal_lookup":       0.50,  # Balanced
+    "unknown":               0.50,  # Safe fallback
+}
+
+
+def rrf_fuse_alpha(bm25_ranking: List[Tuple[str, float]], 
+                   vector_ranking: List[Tuple[str, float]], 
+                   intent_type: str, 
+                   k: int = 60, 
+                   top_n: int = 10) -> List[Tuple[str, float]]:
+    """Merge BM25 and Vector search results using an Intent-driven Alpha weight.
+    
+    Score = alpha * (1 / (rank_bm25 + k)) + (1 - alpha) * (1 / (rank_vector + k))
+    
+    Args:
+        bm25_ranking: Ranked list of (session_id, score) from BM25
+        vector_ranking: Ranked list of (session_id, score) from Vector search
+        intent_type: The query intent string (e.g., 'error_recall')
+        k: RRF constant
+        top_n: Number of results to return
+        
+    Returns:
+        Unified ranked list
+    """
+    alpha = ALPHA_MAP.get(intent_type, 0.50)
+    
+    # If one of the rankings is completely missing (e.g., Ollama is down),
+    # we just fall back to standard unweighted RRF or 100% weight on the available one.
+    if not bm25_ranking:
+        alpha = 0.0
+    elif not vector_ranking:
+        alpha = 1.0
+        
+    rrf_scores: Dict[str, float] = {}
+    
+    # Process BM25
+    for rank, (session_id, _score) in enumerate(bm25_ranking, start=1):
+        rrf_scores[session_id] = alpha * (1.0 / (k + rank))
+        
+    # Process Vector
+    for rank, (session_id, _score) in enumerate(vector_ranking, start=1):
+        if session_id not in rrf_scores:
+            rrf_scores[session_id] = 0.0
+        rrf_scores[session_id] += (1.0 - alpha) * (1.0 / (k + rank))
+        
+    sorted_results = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+    return sorted_results[:top_n]
+

@@ -154,6 +154,7 @@ class ForkIntent(str, Enum):
     CONTINUE = "continue"
     REFERENCE = "reference"
     DEBUG = "debug"
+    SYNTHESIZE = "synthesize"
 
 
 class TaskMetadataV2(BaseModel):
@@ -231,6 +232,9 @@ class SessionDocument(BaseModel):
     # Index management
     indexed_at: int = 0                # When this session was last indexed
     schema_version: int = 2
+    
+    # RAPTOR clustering (Phase 9)
+    cluster_id: Optional[str] = None   # UUID for cross-session topic clustering
 
 
 class QueryDecomposition(BaseModel):
@@ -289,4 +293,5 @@ class VectorResult(BaseModel):
     content: str
     score: float                       # Cosine similarity
     chunk_index: int = 0               # Index within the session's docs of this type
+    parent_id: Optional[str] = None    # UUID for joining full parent text from SQLite
 

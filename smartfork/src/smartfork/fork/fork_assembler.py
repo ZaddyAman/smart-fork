@@ -91,6 +91,25 @@ Be extremely specific about exact error messages, exact file paths, and what cod
 Do NOT include raw code blocks of entire files or raw diff markers.
 Keep the final output dense and concise, roughly between 300 to 600 words.
 """,
+
+    ForkIntent.SYNTHESIZE: """You are synthesizing a multi-session development Epic to help a developer onboard into a complex feature timeline.
+
+Sessions in Epic: {project_name}
+Task Overview: {task_raw}
+Key Domains touched: {domains}
+
+Chronological Reasoning Trail:
+{reasoning_text}
+
+Write a comprehensive chronological synthesis with these sections:
+1. **Epic Overview** (What this string of sessions aimed to achieve at a high level)
+2. **Timeline of Execution** (Chronological breakdown of key architectural phases/checkpoints)
+3. **Core Architectural Shifts** (Major decisions made, pivots, or design changes over time)
+4. **Current State** (Where the code currently stands and what is unresolved)
+
+Focus on the major narrative and cross-session evolution. 
+Do NOT include raw code. Keep it extremely dense and informative.
+""",
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -113,6 +132,11 @@ INTENT_LAYERS = {
         "layers": ["A", "E", "D"],
         "max_reasoning_blocks": 30,
     },
+    ForkIntent.SYNTHESIZE: {
+        "description": "Cross-session synthesis compiling an entire Epic timeline",
+        "layers": ["A", "B", "C"],
+        "max_reasoning_blocks": 50,
+    },
 }
 
 
@@ -121,14 +145,13 @@ class ForkAssembler:
     
     Primary mode: LLM reads session data and generates focused, clean context.
     Fallback mode: Structured assembly from cleaned raw data (when Ollama unavailable).
-    
-    Usage:
-        assembler = ForkAssembler(llm=get_llm("ollama"))
-        context = assembler.assemble(session_doc, ForkIntent.CONTINUE)
     """
     
-    def __init__(self, llm: Optional[LLMProvider] = None):
+    def __init__(self, llm: Optional[LLMProvider] = None, 
+                 vector_index = None, store = None):
         self.llm = llm
+        self.vector_index = vector_index
+        self.store = store
     
     def assemble(self, doc: SessionDocument, intent: ForkIntent,
                   custom_query: str = "") -> str:
@@ -139,7 +162,7 @@ class ForkAssembler:
         """
         # Try LLM-powered assembly first
         if self.llm:
-            result = self._llm_assemble(doc, intent)
+            result = self._llm_assemble(doc, intent, custom_query)
             if result:
                 header = self._build_header(doc, intent)
                 return header + "\n\n" + result
@@ -150,14 +173,64 @@ class ForkAssembler:
     
     # ── LLM-POWERED ASSEMBLY (PRIMARY) ──────────────────────────
     
-    def _llm_assemble(self, doc: SessionDocument, intent: ForkIntent) -> Optional[str]:
+    def _llm_assemble(self, doc: SessionDocument, intent: ForkIntent, custom_query: str = "") -> Optional[str]:
         """Use LLM to read session data and generate intent-specific context."""
         try:
             # Build reasoning text — take most relevant blocks, cap total length
             config = INTENT_LAYERS[intent]
             max_blocks = config["max_reasoning_blocks"]
             
-            reasoning_blocks = doc.reasoning_docs[:max_blocks] if doc.reasoning_docs else []
+            reasoning_blocks = []
+            
+            # Cross-session epic retrieval for SYNTHESIZE intent
+            if intent == ForkIntent.SYNTHESIZE and doc.cluster_id and self.store:
+                try:
+                    logger.debug(f"Fork assembly: fetching Epic timeline for cluster {doc.cluster_id}")
+                    epic_sessions = self.store.conn.execute(
+                        "SELECT session_id, reasoning_docs FROM sessions WHERE cluster_id = ? ORDER BY session_start ASC",
+                        (doc.cluster_id,)
+                    ).fetchall()
+                    
+                    import json
+                    for row in epic_sessions:
+                        docs = json.loads(row['reasoning_docs'] or '[]')
+                        # Take top 5 blocks from each session in the epic to prevent token limits
+                        reasoning_blocks.extend(docs[:5])
+                    reasoning_blocks = reasoning_blocks[:max_blocks]
+                except Exception as e:
+                    logger.warning(f"Failed to fetch SYNTHESIZE epic timeline: {e}")
+                    reasoning_blocks = doc.reasoning_docs[:max_blocks] if doc.reasoning_docs else []
+            # Parent-child semantic retrieval for queried RAG
+            elif custom_query and self.vector_index and self.store:
+                try:
+                    logger.debug(f"Fork assembly: injecting parent chunks for query '{custom_query}'")
+                    query_embedding = self.vector_index.embedder.embed(custom_query, "query")
+                    
+                    # Search reasoning collection just for this session
+                    results = self.vector_index.search(
+                        query_embedding, "reasoning_doc", 
+                        session_ids=[doc.session_id], 
+                        n_results=max_blocks * 2
+                    )
+                    
+                    seen_parents = set()
+                    for r in results:
+                        if r.parent_id and r.parent_id not in seen_parents:
+                            parent_text = self.store.get_parent_chunk(r.parent_id)
+                            if parent_text:
+                                reasoning_blocks.append(parent_text)
+                                seen_parents.add(r.parent_id)
+                        elif not r.parent_id:
+                            # Fallback for legacy v2 sessions without parent_id
+                            reasoning_blocks.append(r.content)
+                            
+                    reasoning_blocks = reasoning_blocks[:max_blocks]
+                except Exception as e:
+                    logger.warning(f"Parent-child retrieval failed, falling back to chronological: {e}")
+                    reasoning_blocks = doc.reasoning_docs[:max_blocks] if doc.reasoning_docs else []
+            else:
+                # No query provided or missing dependencies: fall back to raw chronological
+                reasoning_blocks = doc.reasoning_docs[:max_blocks] if doc.reasoning_docs else []
             
             # Cap each block to 1000 chars and total to ~24000 chars (fits in 32K context easily)
             reasoning_parts = []
@@ -342,14 +415,17 @@ class ForkAssembler:
 
 
 def assemble_fork_context(doc: SessionDocument, intent: str = "continue",
-                           query: str = "", llm: Optional[LLMProvider] = None) -> str:
+                           query: str = "", llm: Optional[LLMProvider] = None,
+                           vector_index = None, store = None) -> str:
     """Convenience function to assemble fork context.
     
     Args:
         doc: SessionDocument
         intent: "continue", "reference", or "debug"
-        query: Optional search query
+        query: Optional search query for parent context retrieval
         llm: Optional LLMProvider for LLM-powered assembly
+        vector_index: Optional VectorIndex
+        store: Optional MetadataStore
     
     Returns:
         Formatted fork context string
@@ -361,5 +437,5 @@ def assemble_fork_context(doc: SessionDocument, intent: str = "continue",
     }
     fork_intent = intent_map.get(intent.lower(), ForkIntent.CONTINUE)
     
-    assembler = ForkAssembler(llm=llm)
-    return assembler.assemble(doc, fork_intent, query)
+    assembler = ForkAssembler(llm=llm, vector_index=vector_index, store=store)
+    return assembler.assemble(doc, fork_intent, custom_query=query)

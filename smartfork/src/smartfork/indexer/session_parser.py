@@ -380,18 +380,37 @@ class SessionParser:
             return match.group(1)
         return None
     
+    def _is_valid_code_ast(self, code_text: str, lang: str = 'python') -> bool:
+        """Check if code block contains valid AST structures using tree-sitter."""
+        try:
+            from tree_sitter import Language, Parser
+            import tree_sitter_python as tspython
+            import tree_sitter_javascript as tsjavascript
+            
+            if lang in ('javascript', 'js', 'ts', 'typescript', 'jsx', 'tsx'):
+                lang_obj = Language(tsjavascript.language())
+            else:
+                lang_obj = Language(tspython.language())
+            
+            parser = Parser(lang_obj)
+            tree = parser.parse(bytes(code_text, "utf8"))
+            
+            # DFS for structural nodes
+            def has_structure(node):
+                if node.type in ('function_definition', 'class_definition', 'method_definition', 
+                               'function_declaration', 'arrow_function', 'class_declaration'):
+                    return True
+                for child in node.children:
+                    if has_structure(child):
+                        return True
+                return False
+                
+            return has_structure(tree.root_node)
+        except Exception as e:
+            return False
+
     def _clean_reasoning_text(self, content: str) -> str:
-        """Clean assistant reasoning text by removing noise.
-        
-        Removes:
-        - <file_content> blocks (code dumps, too noisy)
-        - <environment_details> blocks (already captured in metadata)
-        - XML tags
-        - SEARCH/REPLACE diff blocks (>>>>>> REPLACE, <<<<<<, =======)
-        - Raw terminal error output (npm, pip, git errors)
-        - Excessive file path listings
-        - Repetitive whitespace
-        """
+        """Clean assistant reasoning text by removing noise."""
         text = content
         
         # Remove <file_content>...</file_content> blocks
@@ -404,20 +423,17 @@ class SessionParser:
         text = re.sub(r'<[^>]+>', '', text)
         
         # ── DIFF / SEARCH-REPLACE BLOCK REMOVAL ──
-        # Remove full SEARCH/REPLACE blocks: <<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE
+        # Remove full SEARCH/REPLACE blocks
         text = re.sub(
             r'<{3,}<?<?<?\s*SEARCH.*?>{3,}>?>?>?\s*REPLACE',
             '', text, flags=re.DOTALL
         )
-        # Remove standalone diff markers
         text = re.sub(r'^[<>=]{3,}.*$', '', text, flags=re.MULTILINE)
-        # Remove >>>>>> REPLACE, <<<<<<< SEARCH etc standalone lines
         text = re.sub(r'^\s*>{3,}\s*(REPLACE|replace).*$', '', text, flags=re.MULTILINE)
         text = re.sub(r'^\s*<{3,}\s*(SEARCH|search).*$', '', text, flags=re.MULTILINE)
         text = re.sub(r'^\s*={3,}\s*$', '', text, flags=re.MULTILINE)
         
         # ── RAW TERMINAL OUTPUT REMOVAL ──
-        # npm/pip/git error blocks (multi-line error dumps)
         text = re.sub(
             r'(?:npm\s+(?:error|warn|ERR!).*\n?){2,}',
             '[terminal output removed]', text
@@ -426,17 +442,27 @@ class SessionParser:
             r'(?:pip\s+(?:error|WARNING).*\n?){2,}',
             '[terminal output removed]', text
         )
-        # Traceback blocks
         text = re.sub(
             r'Traceback \(most recent call last\):.*?(?=\n\n|\Z)',
             '[traceback removed]', text, flags=re.DOTALL
         )
         
-        # ── CODE BLOCK CLEANUP ──
-        # Remove large inline code blocks (>10 lines) — these are file dumps, not reasoning
+        # ── CODE BLOCK CLEANUP WITH AST PROTECTION ──
+        def _protect_code_blocks(match):
+            block = match.group(0)
+            lang_match = re.search(r'^```(\w+)', block)
+            lang = lang_match.group(1).lower() if lang_match else 'python'
+            
+            # Extract actual code text to parse
+            code_only = re.sub(r'^```[\w]*\n|```$', '', block, flags=re.MULTILINE)
+            
+            if self._is_valid_code_ast(code_only, lang):
+                return block  # Protect real AST structures
+            return '[code block removed]'
+            
         text = re.sub(
             r'```[\w]*\n(?:[^\n]*\n){10,}```',
-            '[code block removed]', text
+            _protect_code_blocks, text
         )
         
         # ── FILE PATH LIST CLEANUP ──

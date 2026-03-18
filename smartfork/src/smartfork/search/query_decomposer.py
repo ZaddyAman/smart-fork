@@ -73,6 +73,41 @@ TIME_HINT_MAP = {
     "recent": "last_week",
 }
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# GLOBAL MODELS (Cold-start fix for persistent MCP process)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_gliner_model = None
+_intent_classifier = None
+_spacy_nlp = None
+
+def get_gliner():
+    global _gliner_model
+    if _gliner_model is None:
+        from gliner import GLiNER
+        logger.info("Loading GLiNER model (gliner-medium-v2.1)...")
+        _gliner_model = GLiNER.from_pretrained("urchade/gliner_medium-v2.1")
+    return _gliner_model
+
+def get_intent_classifier():
+    global _intent_classifier
+    if _intent_classifier is None:
+        from transformers import pipeline
+        logger.info("Loading DeBERTa Intent Classifier (nli-deberta-v3-xsmall)...")
+        _intent_classifier = pipeline("zero-shot-classification", model="cross-encoder/nli-deberta-v3-xsmall")
+    return _intent_classifier
+
+def get_spacy_nlp():
+    global _spacy_nlp
+    if _spacy_nlp is None:
+        import spacy
+        logger.info("Loading spaCy english model (en_core_web_sm)...")
+        _spacy_nlp = spacy.load("en_core_web_sm")
+        ruler = _spacy_nlp.add_pipe("entity_ruler")
+        patterns = [{"label": "TIME_HINT", "pattern": p} for p in TIME_HINT_MAP.keys()]
+        ruler.add_patterns(patterns)
+    return _spacy_nlp
+
 
 class QueryDecomposer:
     """Decomposes raw user queries into structured QueryDecomposition objects.
@@ -94,81 +129,110 @@ class QueryDecomposer:
     def decompose(self, query: str) -> QueryDecomposition:
         """Decompose a raw query into structured components.
         
-        Tries LLM first, falls back to rule-based extraction on failure.
+        Tries ML (GLiNER + DeBERTa) first, falls back to rule-based extraction on failure.
         Always runs fuzzy project matching against known indexed projects.
         """
         if not query or not query.strip():
             return QueryDecomposition(intent="vague_memory")
         
-        # Try LLM decomposition first (primary path)
-        if self.llm:
-            result = self._llm_decompose(query)
-            if result:
-                # Post-process: fuzzy match the extracted project against indexed names
-                if result.project:
-                    matched = self._fuzzy_match_project(result.project)
-                    if matched:
-                        result.project = matched
-                elif not result.project:
-                    # LLM didn't extract a project, try fuzzy matching raw query
-                    matched = self._fuzzy_match_project_from_query(query)
-                    if matched:
-                        result.project = matched
-                return result
+        # Try zero-shot ML decomposition first (fast, primary path)
+        result = self._ml_decompose(query)
+        if result:
+            # Post-process: fuzzy match the extracted project against indexed names
+            if result.project:
+                matched = self._fuzzy_match_project(result.project)
+                if matched:
+                    result.project = matched
+            elif not result.project:
+                # ML didn't extract a project, try fuzzy matching raw query
+                matched = self._fuzzy_match_project_from_query(query)
+                if matched:
+                    result.project = matched
+            return result
         
         # Fallback to rule-based
         return self._rule_based_decompose(query)
     
-    def _llm_decompose(self, query: str) -> Optional[QueryDecomposition]:
-        """Attempt LLM-powered decomposition."""
+
+
+
+    def _ml_decompose(self, query: str) -> Optional[QueryDecomposition]:
+        """Attempt fast ML-powered decomposition (GLiNER + DeBERTa)."""
         try:
-            # Build project context for the prompt
-            project_context = ""
-            if self.known_projects:
-                names = ", ".join(self.known_projects[:20])
-                project_context = f"Known projects in the index: [{names}]"
+            # 1. Load models (cached globally after first run)
+            gliner = get_gliner()
+            classifier = get_intent_classifier()
+            nlp = get_spacy_nlp()
             
-            prompt = DECOMPOSITION_PROMPT.format(
-                raw_query=query,
-                project_context=project_context,
-            )
-            response = self.llm.complete(prompt, max_tokens=800)
+            # 2. spaCy Temporal Fallback
+            doc = nlp(query.lower())
+            time_hint = None
+            for ent in doc.ents:
+                if ent.label_ == "TIME_HINT":
+                    time_hint = TIME_HINT_MAP.get(ent.text, ent.text.replace(' ', '_'))
+                    break
             
-            if not response:
-                return None
+            # 3. GLiNER Span Extraction
+            labels = ["project_name", "topic", "time_hint", "error_code", "library"]
+            entities = gliner.predict_entities(query, labels)
             
-            # Remove any <think> tags before searching for JSON
-            response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
+            project_name = None
+            topic = None
+            error_code = None
+            tech_terms = []
             
-            # Extract JSON from response (LLM might wrap it in markdown)
-            json_match = re.search(r'\{[^{}]*\}', response, re.DOTALL)
-            if not json_match:
-                logger.warning(f"No JSON found in LLM response: {response[:100]}")
-                return None
+            for ent in entities:
+                label = ent["label"]
+                text = ent["text"].strip()
+                if label == "project_name" and not project_name:
+                    project_name = text
+                elif label == "topic" and not topic:
+                    topic = text
+                elif label == "error_code" and not error_code:
+                    error_code = text
+                elif label == "library":
+                    tech_terms.append(text)
+                elif label == "time_hint" and not time_hint:
+                    time_hint_clean = text.lower().replace(' ', '_')
+                    time_hint = TIME_HINT_MAP.get(text.lower(), time_hint_clean)
             
-            data = json.loads(json_match.group())
+            # 4. DeBERTa Sequence Classification (Intent)
+            candidate_labels = [
+                "decision_hunting", "implementation_lookup", 
+                "error_recall", "pattern_hunting", "temporal_lookup"
+            ]
             
-            # Validate intent
-            valid_intents = {
-                "decision_hunting", "implementation_lookup", "error_recall",
-                "file_lookup", "temporal_lookup", "pattern_hunting", "vague_memory"
-            }
-            intent = data.get("intent", "vague_memory")
-            if intent not in valid_intents:
-                intent = "vague_memory"
+            if not topic and not project_name and not error_code and len(query.split()) < 3:
+                intent_type = "temporal_lookup" if time_hint else "vague_memory"
+            else:
+                result = classifier(query, candidate_labels)
+                intent_type = result["labels"][0]
             
+            # 5. Rapidfuzz Project Resolution
+            if project_name and self.known_projects:
+                from rapidfuzz import process, fuzz
+                best_match = process.extractOne(project_name, self.known_projects, scorer=fuzz.WRatio)
+                if best_match and best_match[1] >= 80:
+                    project_name = best_match[0]
+            
+            # 6. File tracking (legacy regex is robust enough)
+            file_hint = self._extract_file_hint(query)
+            
+            if error_code:
+                tech_terms.append(error_code)
+
             return QueryDecomposition(
-                intent=intent,
-                topic=data.get("topic"),
-                project=data.get("project"),
-                file_hint=data.get("file_hint"),
-                time_hint=data.get("time_hint"),
-                tech_terms=data.get("tech_terms", []),
-                is_temporal_only=data.get("is_temporal_only", False),
+                intent=intent_type,
+                topic=topic,
+                project=project_name,
+                file_hint=file_hint,
+                time_hint=time_hint,
+                tech_terms=list(set(tech_terms)),
+                is_temporal_only=(time_hint is not None and not topic and intent_type in ["temporal_lookup", "vague_memory"])
             )
             
-        except (json.JSONDecodeError, Exception) as e:
-            logger.warning(f"LLM decomposition failed, using rule-based: {e}")
+        except Exception as e:
+            logger.warning(f"ML decomposition failed, using rule-based fallback: {e}")
             return None
     
     # ── FUZZY PROJECT MATCHING ───────────────────────────────────

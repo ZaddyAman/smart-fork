@@ -71,6 +71,7 @@ class SmartForkMCPServer:
                     "properties": {
                         "session_id": {"type": "string", "description": "Session ID to fork from"},
                         "intent": {"type": "string", "enum": ["continue", "reference", "debug"], "default": "continue"},
+                        "query": {"type": "string", "description": "Optional search query to isolate specific reasoning context"},
                     },
                     "required": ["session_id"],
                 },
@@ -166,6 +167,7 @@ class SmartForkMCPServer:
         """Handle fork tool call."""
         session_id = args.get("session_id", "")
         intent = args.get("intent", "continue")
+        query = args.get("query", "")
         
         if not self.metadata_store:
             return {"error": "SmartFork index not initialized"}
@@ -173,9 +175,22 @@ class SmartForkMCPServer:
         doc = self.metadata_store.get_session(session_id)
         if not doc:
             return {"error": f"Session {session_id} not found"}
+            
+        # Optional: initialize LLM for higher quality MCP context if possible
+        llm = None
+        try:
+            from ..intelligence.llm_provider import get_llm
+            from ..search.embedder import check_ollama_available
+            # Check availability without blocking if it fails
+            llm = get_llm("ollama")
+        except Exception:
+            pass
         
         from ..fork.fork_assembler import assemble_fork_context
-        context = assemble_fork_context(doc, intent)
+        context = assemble_fork_context(
+            doc, intent, query=query, llm=llm,
+            vector_index=self.vector_index, store=self.metadata_store
+        )
         
         return {
             "context": context,

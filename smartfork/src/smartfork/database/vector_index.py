@@ -68,9 +68,26 @@ class VectorIndex:
             metadata={"hnsw:space": "cosine"}
         )
         
+        self.noise_embeddings = []
         logger.debug(f"VectorIndex initialized at {db_path}")
+
+    def _get_noise_embeddings(self) -> List[List[float]]:
+        """Lazy load noise prototype embeddings for cosine filtering."""
+        if not self.noise_embeddings:
+            prototypes = [
+                "Here is a summary of the operations performed and files updated.",
+                "Let me check the workspace to see what files are present.",
+                "I will now run the command to verify the output.",
+                "The following files have been modified successfully.",
+                "I will write the updated content to the file now."
+            ]
+            try:
+                self.noise_embeddings = self.embedder.embed_batch(prototypes, "reasoning_doc")
+            except Exception as e:
+                logger.warning(f"Failed to generate noise embeddings: {e}")
+        return self.noise_embeddings
     
-    def index_session(self, doc: SessionDocument) -> Dict[str, int]:
+    def index_session(self, doc: SessionDocument, store=None) -> Dict[str, int]:
         """Index all embeddable documents for a session.
         
         Uses batch embedding for efficiency — one API call per doc type
@@ -90,7 +107,7 @@ class VectorIndex:
         # Build all documents first (CPU-only, fast)
         task_doc = self.chunker.build_task_doc(doc)
         summary_doc = self.chunker.build_summary_doc(doc)
-        reasoning_docs = self.chunker.build_reasoning_docs(doc)
+        reasoning_chunks = self.chunker.build_reasoning_docs(doc)
         
         # ── BATCH EMBED + STORE: task_doc ──
         if task_doc:
@@ -131,26 +148,73 @@ class VectorIndex:
                 logger.warning(f"Failed to index summary_doc for {doc.session_id}: {e}")
         
         # ── BATCH EMBED + STORE: reasoning_docs (the big win) ──
-        if reasoning_docs:
+        if reasoning_chunks:
             try:
+                texts_to_embed = [chunk["text"] for chunk in reasoning_chunks]
+                ids = [chunk["id"] for chunk in reasoning_chunks]
+                
                 # Single batch embed call instead of N individual calls
-                embeddings = self.embedder.embed_batch(reasoning_docs, "reasoning_doc")
+                embeddings = self.embedder.embed_batch(texts_to_embed, "reasoning_doc")
                 
-                ids = [f"{doc.session_id}_reasoning_{i}" for i in range(len(reasoning_docs))]
-                metadatas = [{
-                    "session_id": doc.session_id,
-                    "doc_type": "reasoning_doc",
-                    "project_name": doc.project_name,
-                    "chunk_index": i,
-                } for i in range(len(reasoning_docs))]
+                # Semantic Denoising - Cosine Pre-Filter (Phase 8)
+                noise_embs = self._get_noise_embeddings()
                 
-                self.reasoning_collection.add(
-                    ids=ids,
-                    embeddings=embeddings,
-                    documents=reasoning_docs,
-                    metadatas=metadatas,
-                )
-                counts["reasoning"] = len(reasoning_docs)
+                valid_ids = []
+                valid_embeddings = []
+                valid_docs = []
+                valid_metas = []
+                
+                import numpy as np
+                seen_parents = set()
+                
+                for i, chunk in enumerate(reasoning_chunks):
+                    emb = np.array(embeddings[i])
+                    is_noise = False
+                    
+                    if noise_embs:
+                        for n_emb in noise_embs:
+                            n_emb_arr = np.array(n_emb)
+                            norm_emb = np.linalg.norm(emb)
+                            norm_n_emb = np.linalg.norm(n_emb_arr)
+                            if norm_emb > 0 and norm_n_emb > 0:
+                                similarity = np.dot(emb, n_emb_arr) / (norm_emb * norm_n_emb)
+                                if similarity > 0.85:
+                                    is_noise = True
+                                    break
+                    
+                    if not is_noise:
+                        valid_ids.append(ids[i])
+                        valid_embeddings.append(embeddings[i])
+                        valid_docs.append(texts_to_embed[i])
+                        valid_metas.append({
+                            "session_id": doc.session_id,
+                            "doc_type": "reasoning_doc",
+                            "project_name": doc.project_name,
+                            "chunk_index": chunk["chunk_index"],
+                            "parent_id": chunk["parent_id"]
+                        })
+                        
+                        if store:
+                            pid = chunk["parent_id"]
+                            if pid not in seen_parents:
+                                store.insert_parent_chunk(
+                                    parent_id=pid,
+                                    session_id=doc.session_id,
+                                    chunk_index=chunk["chunk_index"],
+                                    full_raw_text=chunk["full_raw_text"]
+                                )
+                                seen_parents.add(pid)
+                                
+                if not valid_docs:
+                    counts["reasoning"] = 0
+                else:
+                    self.reasoning_collection.add(
+                        ids=valid_ids,
+                        embeddings=valid_embeddings,
+                        documents=valid_docs,
+                        metadatas=valid_metas,
+                    )
+                    counts["reasoning"] = len(valid_docs)
             except Exception as e:
                 logger.warning(f"Failed to batch index reasoning_docs for {doc.session_id}: {e}")
         
@@ -335,6 +399,7 @@ class VectorIndex:
                 content=doc,
                 score=similarity,
                 chunk_index=meta.get("chunk_index", 0),
+                parent_id=meta.get("parent_id")
             ))
         
         return vector_results

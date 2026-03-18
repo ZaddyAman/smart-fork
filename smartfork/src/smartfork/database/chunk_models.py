@@ -34,6 +34,7 @@ class EnhancedChunkMetadata(BaseModel):
     session_id: str
     task_id: str
     chunk_index: int
+    parent_id: Optional[str] = None
     message_range: Optional[MessageRange] = None
     
     # Content classification

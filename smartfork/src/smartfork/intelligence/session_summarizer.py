@@ -69,17 +69,61 @@ class SessionSummarizer:
         domains = ", ".join(doc.domains[:5]) if doc.domains else "none"
         duration = round(doc.duration_minutes, 1) if doc.duration_minutes else "unknown"
         
-        # Get up to 5 reasoning blocks, 500 chars each, for better coverage
+        # Generate 3-window (33% / 66% / 100%) Temporal Summary using sumy TextRank
         reasoning_excerpt = ""
         if doc.reasoning_docs:
-            excerpts = []
-            for r in doc.reasoning_docs[:5]:
-                # Take first 500 chars of each block
-                excerpt = r[:500].strip()
-                if len(r) > 500:
-                    excerpt += "..."
-                excerpts.append(excerpt)
-            reasoning_excerpt = "\n---\n".join(excerpts)
+            try:
+                from sumy.parsers.plaintext import PlaintextParser
+                from sumy.nlp.tokenizers import Tokenizer
+                from sumy.summarizers.text_rank import TextRankSummarizer
+                import nltk
+                try:
+                    nltk.data.find('tokenizers/punkt')
+                except LookupError:
+                    # Some versions require punkt_tab, some punkt. download both.
+                    nltk.download('punkt', quiet=True)
+                    nltk.download('punkt_tab', quiet=True)
+                
+                blocks = doc.reasoning_docs
+                n = len(blocks)
+                
+                # Split independently: 0-33%, 33-66%, 66-100%
+                w1_end = max(1, n // 3)
+                w2_end = max(2, (2 * n) // 3)
+                
+                start_window = blocks[:w1_end]
+                mid_window = blocks[w1_end:w2_end]
+                end_window = blocks[w2_end:]
+                
+                def extract_text(window_blocks: list[str]) -> str:
+                    text = "\n".join(window_blocks).strip()
+                    if not text:
+                        return ""
+                    parser = PlaintextParser.from_string(text, Tokenizer("english"))
+                    summarizer = TextRankSummarizer()
+                    sentences = summarizer(parser.document, 2)
+                    return " ".join(str(s) for s in sentences)
+                
+                excerpts = []
+                for win in [start_window, mid_window, end_window]:
+                    if win:
+                        e = extract_text(win)
+                        if e:
+                            excerpts.append(e)
+                reasoning_excerpt = "\n---\n".join(excerpts)
+            except Exception as e:
+                logger.warning(f"sumy TextRank generation failed, falling back to simple extraction: {e}")
+                
+            if not reasoning_excerpt:
+                # Fallback if sumy failed or returned empty
+                excerpts = []
+                for r in doc.reasoning_docs[:5]:
+                    excerpt = r[:500].strip()
+                    if len(r) > 500:
+                        excerpt += "..."
+                    excerpts.append(excerpt)
+                reasoning_excerpt = "\n---\n".join(excerpts)
+                
         reasoning_excerpt = reasoning_excerpt or "no reasoning available"
         
         prompt = SUMMARY_PROMPT.format(

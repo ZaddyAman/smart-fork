@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- Reasoning docs (JSON array of strings)
     reasoning_docs   TEXT DEFAULT '[]',
     
+    -- Cluster ID for RAPTOR Cross-Session Retrieval (Phase 9)
+    cluster_id       TEXT,
+    
     -- Index management
     indexed_at       INTEGER,
     schema_version   INTEGER DEFAULT 2
@@ -64,6 +67,15 @@ CREATE INDEX IF NOT EXISTS idx_project ON sessions(project_name);
 CREATE INDEX IF NOT EXISTS idx_start ON sessions(session_start);
 CREATE INDEX IF NOT EXISTS idx_pattern ON sessions(session_pattern);
 CREATE INDEX IF NOT EXISTS idx_indexed_at ON sessions(indexed_at);
+
+CREATE TABLE IF NOT EXISTS parent_chunks (
+    parent_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    full_raw_text TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_parent_session ON parent_chunks(session_id);
 """
 
 
@@ -96,6 +108,10 @@ class MetadataStore:
         
         # Create schema
         self.conn.executescript(SCHEMA_SQL)
+        try:
+            self.conn.execute("ALTER TABLE sessions ADD COLUMN cluster_id TEXT")
+        except sqlite3.OperationalError:
+            pass
         self.conn.commit()
         
         logger.debug(f"MetadataStore initialized at {self.db_path}")
@@ -117,8 +133,8 @@ class MetadataStore:
                 edit_count, user_edit_count, final_files,
                 domains, languages, layers, session_pattern,
                 task_raw, summary_doc, reasoning_docs,
-                indexed_at, schema_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cluster_id, indexed_at, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             doc.session_id,
             doc.project_name,
@@ -140,6 +156,7 @@ class MetadataStore:
             doc.task_raw,
             doc.summary_doc,
             json.dumps(doc.reasoning_docs),
+            doc.cluster_id,
             doc.indexed_at or int(time.time() * 1000),
             doc.schema_version,
         ))
@@ -309,6 +326,38 @@ class MetadataStore:
             "GROUP BY project_name ORDER BY count DESC"
         ).fetchall()
         return [{"project_name": r["project_name"], "session_count": r["count"]} for r in rows]
+
+    def insert_parent_chunk(self, parent_id: str, session_id: str, chunk_index: int, full_raw_text: str) -> None:
+        """Insert a parent chunk into the store.
+        
+        Args:
+            parent_id: Unique UUID for this parent reasoning block
+            session_id: The session this block belongs to
+            chunk_index: Chronological index of this block in the session
+            full_raw_text: The entire unprocessed reasoning text
+        """
+        self.conn.execute("""
+            INSERT OR REPLACE INTO parent_chunks (
+                parent_id, session_id, chunk_index, full_raw_text
+            ) VALUES (?, ?, ?, ?)
+        """, (parent_id, session_id, chunk_index, full_raw_text))
+        self.conn.commit()
+
+    def get_parent_chunk(self, parent_id: str) -> Optional[str]:
+        """Retrieve the full raw text of a parent chunk by its UUID.
+        
+        Args:
+            parent_id: The UUID stored in ChromaDB metadata
+            
+        Returns:
+            The full raw text if found, else None
+        """
+        row = self.conn.execute(
+            "SELECT full_raw_text FROM parent_chunks WHERE parent_id = ?", (parent_id,)
+        ).fetchone()
+        if row:
+            return row['full_raw_text']
+        return None
     
     def delete_session(self, session_id: str) -> None:
         """Delete a session from the store.
@@ -359,6 +408,7 @@ class MetadataStore:
             task_raw=row['task_raw'] or '',
             summary_doc=row['summary_doc'] or '',
             reasoning_docs=json.loads(row['reasoning_docs'] or '[]'),
+            cluster_id=row['cluster_id'] if 'cluster_id' in row.keys() else None,
             indexed_at=row['indexed_at'] or 0,
             schema_version=row['schema_version'] or 2,
         )

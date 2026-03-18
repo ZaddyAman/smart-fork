@@ -2085,7 +2085,7 @@ def search_v2(
     from .database.metadata_store import MetadataStore
     from .search.query_decomposer import QueryDecomposer, get_vector_weights
     from .search.bm25_index import BM25Index
-    from .search.rrf_fusion import rrf_fuse_weighted
+    from .search.rrf_fusion import rrf_fuse_alpha
     from .ui.result_card import build_result_card, render_result_cards
     from .search.embedder import check_ollama_available, get_embedder
 
@@ -2188,14 +2188,13 @@ def search_v2(
         logger.warning(f"Vector search failed: {e}")
 
     # Step 5: RRF Fusion (combine BM25 + vector rankings)
-    rankings = []
-    if bm25_results:
-        rankings.append(bm25_results)
-    if vector_results_ranked:
-        rankings.append(vector_results_ranked)
-
-    if rankings:
-        fused = rrf_fuse_weighted(rankings, top_n=n_results)
+    if bm25_results or vector_results_ranked:
+        fused = rrf_fuse_alpha(
+            bm25_ranking=bm25_results,
+            vector_ranking=vector_results_ranked,
+            intent_type=decomposition.intent,
+            top_n=n_results
+        )
     else:
         # Fallback: use candidate order (most recent first)
         fused = [(sid, 0.5) for sid in candidates[:n_results]]
@@ -2235,17 +2234,12 @@ def search_v2(
 def fork_v2(
     session_id: str = typer.Argument(..., help="Session ID to fork context from"),
     intent: str = typer.Option("continue", "--intent", "-i",
-                                help="Fork intent: continue, reference, or debug"),
+                                "Fork intent: continue, reference, or debug"),
+    query: str = typer.Option("", "--query", "-q", help="Optional query to filter context using Vector Search"),
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file path"),
     clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Copy to clipboard"),
 ):
-    """Generate intent-classified fork context from a v2-indexed session.
-    
-    Intents:
-      continue  — Resume exactly where you left off (full reasoning trail)
-      reference — Reuse the approach/decisions in new work
-      debug     — Get the error context and fix
-    """
+    """Generate intent-classified fork context from a v2-indexed session."""
     config = get_config()
     theme_name = getattr(config, "theme", DEFAULT_THEME)
     theme = get_theme_colors(theme_name)
@@ -2284,21 +2278,31 @@ def fork_v2(
         border_style=theme["panel_border"]
     ))
 
-    # Initialize LLM for intelligent fork assembly
+    # Initialize LLM and VectorIndex for intelligent fork assembly
     llm = None
+    vector_index = None
     try:
         from .intelligence.llm_provider import get_llm
+        from .search.embedder import get_embedder
+        from .database.vector_index import VectorIndex
+        
         ollama_check = check_ollama_available(config.embedding_model)
         if ollama_check["available"]:
             llm = get_llm("ollama")
+            embedder = get_embedder("ollama", config.embedding_model, config.embedding_dimensions)
+            vector_index = VectorIndex(config.chroma_db_path / "v2_index", embedder)
             console.print(f"[{theme['text_muted']}]Using LLM for context distillation...[/{theme['text_muted']}]")
         else:
             console.print(f"[{theme['text_muted']}]Ollama not running — using cleaned raw assembly[/{theme['text_muted']}]")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Failed to init LLM/VectorIndex: {e}")
 
     # Assemble context (LLM-powered if available, raw fallback otherwise)
-    context = assemble_fork_context(doc, intent, llm=llm)
+    with console.status(f"[{info_color}]Assembling context...[/{info_color}]"):
+        context = assemble_fork_context(
+            doc, intent, query=query, llm=llm, 
+            vector_index=vector_index, store=store
+        )
 
     # Deliver
     if clipboard:

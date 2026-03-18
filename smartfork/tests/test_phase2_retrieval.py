@@ -82,7 +82,11 @@ class TestContextualChunker:
         docs = chunker.build_reasoning_docs(sample_doc)
         assert len(docs) >= 2
         for doc in docs:
-            assert doc.startswith("[Project:")
+            assert isinstance(doc, dict)
+            assert doc["text"].startswith("[Project:")
+            assert doc["parent_id"] is not None
+            assert doc["chunk_index"] >= 0
+            assert doc["full_raw_text"] is not None
     
     def test_long_reasoning_split(self, chunker, sample_doc):
         # Create a very long reasoning block
@@ -92,8 +96,12 @@ class TestContextualChunker:
         docs = chunker.build_reasoning_docs(sample_doc)
         # Should be split into multiple chunks
         assert len(docs) > 1
+        # In a variable split, children of the same block should share a parent_id
+        parent_ids = [d["parent_id"] for d in docs]
+        assert len(set(parent_ids)) == 1
         for doc in docs:
-            assert doc.startswith("[Project:")
+            assert doc["text"].startswith("[Project:")
+            assert doc["full_raw_text"] == long_text
     
     def test_empty_reasoning_docs(self, chunker, sample_doc):
         sample_doc.reasoning_docs = []
