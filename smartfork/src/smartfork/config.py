@@ -38,10 +38,16 @@ class SmartForkConfig(BaseSettings):
     )
     
     # Database paths
-    chroma_db_path: Path = Field(
-        default=Path.home() / ".smartfork/chroma_db",
-        description="Path to ChromaDB storage"
+    qdrant_db_path: Path = Field(
+        default=Path.home() / ".smartfork/qdrant_db",
+        description="Path to Qdrant storage"
     )
+    
+    # Legacy alias for backwards compatibility
+    @property
+    def chroma_db_path(self) -> Path:
+        """Legacy alias - now points to Qdrant storage."""
+        return self.qdrant_db_path
     
     cache_dir: Path = Field(
         default=Path.home() / ".smartfork/cache",

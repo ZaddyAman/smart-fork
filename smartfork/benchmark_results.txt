@@ -1,0 +1,868 @@
+================================================================================
+  SmartFork search-v2 Benchmark — 10 Queries
+  Date: 2026-03-22 23:38:13
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+  Query 1/10: "auth decisions in BharatLawAI"
+────────────────────────────────────────────────────────────────────────────────
+
+▪Query: auth decisions in BharatLawAI
+Intent: decision_hunting | Topic: bharatlawai | Project: bharatlaw-frontend | 
+Decomposer: rule-based
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 bharatlaw-frontend — 'PROJECT_HANDOFF.md' (see below for file            │
+│ content)...                                                                 │
+│ 🕐 6 months ago (44 min) | ⚡ 56% match                                     │
+│ "{children}                                                                 │
+│                                                                             │
+│       {/* Main */}                                                          │
+│                                                                             │
+│         {children}"                                                         │
+│ Why: Contains reasoning/decisions | Domains: auth, backend, database |      │
+│ Files: Layout.tsx, ChatPage.tsx, ChatSidebar.tsx                            │
+│ 🔑 a9f2e542-0ac2-47e3-ab8a-62be8d5368bd  →  smartfork fork-v2               │
+│ a9f2e542-0ac2-47                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 bharatlaw-frontend — 'bharatlaw-frontend/' (see below for folder         │
+│ conten...                                                                   │
+│ 🕐 6 months ago (14 min) | ⚡ 56% match                                     │
+│ "handleSelectJudgment(judgment)}                                            │
+│                                                                             │
+│                 {judgment.case_title}                                       │
+│                 {judgment.citation} // Added cita"                          │
+│ Why: Contains reasoning/decisions | Domains: backend, frontend, ingest |    │
+│ Files: LegalLibraryPage.tsx, LegalLibraryPage.tsx, LegalLibraryPage.tsx     │
+│ 🔑 e642be3f-9865-4b8c-988d-05b7739a681b  →  smartfork fork-v2               │
+│ e642be3f-9865-4b                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 bharatlaw-frontend — pls work on our login form                          │
+│                                                                             │
+│                                                                             │
+│ Welcome Back                                                                │
+│ Access...                                                                   │
+│ 🕐 6 months ago (657 min) | ⚡ 55% match                                    │
+│ "Welcome Back                                                               │
+│           Access your legal AI assistant and continue your consultations    │
+│                                                                             │
+│         {/* OAuth Login Section *"                                          │
+│ Why: Contains reasoning/decisions | Domains: auth, frontend | Files:        │
+│ LoginForm.tsx, LoginPage.tsx, LoginPage.tsx                                 │
+│ 🔑 8def5751-acff-4700-9ee7-59d1fe55f0d6  →  smartfork fork-v2               │
+│ 8def5751-acff-47                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 bharatlaw-frontend — open chat history button after we hide our chat     │
+│ hi...                                                                       │
+│ 🕐 6 months ago (1181 min) | ⚡ 55% match                                   │
+│ "{/* Collapsed state toggle button */}                                      │
+│       {!isOpen && ("                                                        │
+│ Why: Contains reasoning/decisions | Domains: auth, backend, database |      │
+│ Files: ChatSidebar.tsx, ChatPanel.tsx, index.css                            │
+│ 🔑 e05c4ba2-4b8f-4600-940f-971e41009f82  →  smartfork fork-v2               │
+│ e05c4ba2-4b8f-46                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 bharatlaw-frontend — Right then, let's cut through the noise and talk    │
+│ a...                                                                        │
+│ 🕐 6 months ago (27 min) | ⚡ 55% match                                     │
+│ "{/* Assistant Message Content */}                                          │
+│                                                                             │
+│                 {isStreaming ? streamingText : message.content}             │
+│                                                                             │
+│               {isLoa"                                                       │
+│ Why: Contains reasoning/decisions | Domains: frontend | Files:              │
+│ ChatMessage.tsx, ChatMessage.tsx, ChatMessage.tsx                           │
+│ 🔑 cdea92f7-eb26-4278-b3e8-bfa1f53b8fdb  →  smartfork fork-v2               │
+│ cdea92f7-eb26-42                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+Use smartfork fork-v2 <session_id> --intent continue|reference|debug
+2026-03-22 23:38:19 | INFO     | smartfork.search.query_decomposer:get_spacy_nlp:87 - Loading spaCy english model (en_core_web_sm)...
+
+  ⏱ Query time: 8.5s
+
+────────────────────────────────────────────────────────────────────────────────
+  Query 2/10: "that CORS bug I fixed"
+────────────────────────────────────────────────────────────────────────────────
+
+▪Query: that CORS bug I fixed
+Intent: error_recall | Topic: cors | Project: langchain_rag_engine | 
+Decomposer: rule-based
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — Enhance security middleware with comprehensive    │
+│ sec...                                                                      │
+│ 🕐 6 months ago (12 min) | ⚡ 62% match                                     │
+│ "The user wants me to enhance security middleware with comprehensive        │
+│ security headers, CORS configuration, and vulnerabil"                       │
+│ Why: Contains reasoning/decisions | Domains: backend, testing | Files:      │
+│ security_middleware.py, main.py, security_middleware.py                     │
+│ 🔑 da63ff1a-d2f4-497d-94bf-a96ff6358b47  →  smartfork fork-v2               │
+│ da63ff1a-d2f4-49                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — our service running fine but for accessing it we  │
+│ n...                                                                        │
+│ 🕐 6 months ago (39 min) | ⚡ 61% match                                     │
+│ "First, the user is asking about networking options for their backend on    │
+│ Railway. The service is running fine, but they n"                           │
+│ Why: Contains reasoning/decisions | Domains: auth, backend, database |      │
+│ Files: main.py, main.py, main.py                                            │
+│ 🔑 e1ef17db-2fd4-4ce6-83e7-40645a13f79d  →  smartfork fork-v2               │
+│ e1ef17db-2fd4-4c                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — pls code through current dir and review all the   │
+│ co...                                                                       │
+│ 🕐 6 months ago (3047 min) | ⚡ 28% match                                   │
+│ "supabase_schema.md                                                         │
+│                                                                             │
+│ > 'sub' = id::text);                                                        │
+│                                                                             │
+│ CREATE POLICY "Users can update own profile" ON users                       │
+│     FOR UPDATE USING (au"                                                   │
+│ Why: Contains reasoning/decisions | Domains: backend, database, devops |    │
+│ Files: DEPLOYMENT_LOG.md, DEPLOYMENT_LOG.md, supabase_schema.md             │
+│ 🔑 6c0d2fd2-5af0-4994-99c4-2ae1dae514ef  →  smartfork fork-v2               │
+│ 6c0d2fd2-5af0-49                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — 'bharatlaw-frontend/' (see below for folder       │
+│ conten...                                                                   │
+│ 🕐 6 months ago (1167 min) | ⚡ 28% match                                   │
+│ "str:                                                                       │
+│                                                                             │
+│     Returns a quick, appropriate response based on the classified intent.   │
+│                                                                             │
+│     responses = {                                                           │
+│         "greeting": ""                                                      │
+│ Why: Contains reasoning/decisions | Domains: auth, backend, database |      │
+│ Files: auth.py, auth.py, auth.py                                            │
+│ 🔑 04bb799b-acb3-4a63-b9e2-67b571b34eb9  →  smartfork fork-v2               │
+│ 04bb799b-acb3-4a                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — Please review my codebase for the full-stack AI   │
+│ bo...                                                                       │
+│ 🕐 6 months ago (166 min) | ⚡ 27% match                                    │
+│ "## 📋 **Conversation Summary**                                             │
+│                                                                             │
+│ ### **Context: Production Readiness Implementation for BharatLaw AI**       │
+│                                                                             │
+│ This conversation "                                                         │
+│ Why: Contains reasoning/decisions | Domains: auth, backend, database |      │
+│ Files: migrate_performance_indexes.py, config.py, config.py                 │
+│ 🔑 d5673f1d-71fe-4bd8-b4c7-d0bde815b7a5  →  smartfork fork-v2               │
+│ d5673f1d-71fe-4b                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+Use smartfork fork-v2 <session_id> --intent continue|reference|debug
+2026-03-22 23:38:28 | INFO     | smartfork.search.query_decomposer:get_spacy_nlp:87 - Loading spaCy english model (en_core_web_sm)...
+
+  ⏱ Query time: 8.5s
+
+────────────────────────────────────────────────────────────────────────────────
+  Query 3/10: "how did I structure FastAPI routes"
+────────────────────────────────────────────────────────────────────────────────
+
+▪Query: how did I structure FastAPI routes
+Intent: implementation_lookup | Topic: fastapi | Project: langchain_rag_engine 
+| Decomposer: rule-based
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — refer this doc to deploy over fast api on         │
+│ railways...                                                                 │
+│ 🕐 6 months ago (20 min) | ⚡ 61% match                                     │
+│ "First, the user wants to deploy a FastAPI app on Railway, referring to the │
+│ doc: https://docs.railway.com/guides/fastapi                                │
+│ "                                                                           │
+│ Why: Contains reasoning/decisions | Domains: auth, backend, database |      │
+│ Files: .gitignore, __init__.py, main.py                                     │
+│ 🔑 559881ca-6478-4178-b53a-d8e93e29ebe2  →  smartfork fork-v2               │
+│ 559881ca-6478-41                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — Create comprehensive input validation middleware  │
+│ a...                                                                        │
+│ 🕐 6 months ago (4 min) | ⚡ 61% match                                      │
+│ "The user wants me to create comprehensive input validation middleware and  │
+│ security headers for API protection. Looking a"                             │
+│ Why: Contains reasoning/decisions | Domains: auth, backend, testing |       │
+│ Files: security_middleware.py, main.py, main.py                             │
+│ 🔑 073b472f-7158-4ed1-a01a-4cbc6f822329  →  smartfork fork-v2               │
+│ 073b472f-7158-4e                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — INFO:     127.0.0.1:36724 - "GET                  │
+│ /api/judgments?sk...                                                        │
+│ 🕐 5 months ago (34 min) | ⚡ 60% match                                     │
+│ ") => {                                                                     │
+│                                                                             │
+│   const [showFilters, setShowFilters] = useState(false);                    │
+│                                                                             │
+│   // Sync internal state with prop changes                                  │
+│   useEffect"                                                                │
+│ Why: Contains reasoning/decisions | Domains: backend, database, frontend |  │
+│ Files: acts.py, acts.py, .env                                               │
+│ 🔑 fdb1ce0f-d30a-48f8-9257-8c59c2041c91  →  smartfork fork-v2               │
+│ fdb1ce0f-d30a-48                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — Nice — here’s a tighter, production-ready         │
+│ **improv...                                                                 │
+│ 🕐 6 months ago (278 min) | ⚡ 59% match                                    │
+│ "[Response interrupted by user]"                                            │
+│ Why: Contains reasoning/decisions | Domains: auth, backend, database |      │
+│ Files: query_engine.py, main.py, main.py                                    │
+│ 🔑 9de916a3-a473-4661-90a9-3987a5bb09fe  →  smartfork fork-v2               │
+│ 9de916a3-a473-46                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — our service running fine but for accessing it we  │
+│ n...                                                                        │
+│ 🕐 6 months ago (39 min) | ⚡ 45% match                                     │
+│ "First, the user is asking about networking options for their backend on    │
+│ Railway. The service is running fine, but they n"                           │
+│ Why: Contains reasoning/decisions | Domains: auth, backend, database |      │
+│ Files: main.py, main.py, main.py                                            │
+│ 🔑 e1ef17db-2fd4-4ce6-83e7-40645a13f79d  →  smartfork fork-v2               │
+│ e1ef17db-2fd4-4c                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+Use smartfork fork-v2 <session_id> --intent continue|reference|debug
+2026-03-22 23:38:36 | INFO     | smartfork.search.query_decomposer:get_spacy_nlp:87 - Loading spaCy english model (en_core_web_sm)...
+
+  ⏱ Query time: 8.3s
+
+────────────────────────────────────────────────────────────────────────────────
+  Query 4/10: "ChromaDB embedding setup"
+────────────────────────────────────────────────────────────────────────────────
+
+▪Query: ChromaDB embedding setup
+Intent: implementation_lookup | Topic: chromadb | Project: all | Decomposer: 
+rule-based
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 plans — I need to implement the SmartFork project - an AI-...            │
+│ 🕐 2 weeks ago (2 min) | ⚡ 61% match                                       │
+│ "I'll implement the SmartFork project foundation step by step. Let me start │
+│ by creating the directory structure and core "                              │
+│ Why: Contains reasoning/decisions                                           │
+│ 🔑 019cab23-7bc6-71ce-bbf0-eedbb82ec384  →  smartfork fork-v2               │
+│ 019cab23-7bc6-71                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 smartfork — Implement performance optimizations to reduce CPU...         │
+│ 🕐 2 weeks ago (21 min) | ⚡ 58% match                                      │
+│ "I'll implement the performance optimizations for SmartFork. Let me start   │
+│ by reading the relevant files to understand the"                            │
+│ Why: Contains reasoning/decisions | Domains: backend, rag | Files:          │
+│ config.py, config.py, config.py                                             │
+│ 🔑 019cb49d-5fe7-72eb-9c9d-8809488bb52a  →  smartfork fork-v2               │
+│ 019cb49d-5fe7-72                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 smartfork — Start implementing Session Auto-Titling feature fo...        │
+│ 🕐 2 weeks ago (13 min) | ⚡ 58% match                                      │
+│ "I'll start implementing the Session Auto-Titling feature. Let me first     │
+│ examine the current data models and intelligence "                          │
+│ Why: Contains reasoning/decisions | Domains: backend, database, rag |       │
+│ Files: titling.py, models.py, __init__.py                                   │
+│ 🔑 019cb038-6355-7307-af17-3c0df4dfadfb  →  smartfork fork-v2               │
+│ 019cb038-6355-73                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 unknown_project — pls check my portfolio website codebase analyse an...  │
+│ 🕐 5 months ago (29 min) | ⚡ 45% match                                     │
+│ "Aman Sayyad                                                                │
+│         Data Engineer | Database Specialist                                 │
+│                                                                             │
+│         {sections.map(section => (                                          │
+│            setActiveSection("                                               │
+│ Why: Contains reasoning/decisions | Domains: frontend | Files: script.js,   │
+│ gui.html, script.js                                                         │
+│ 🔑 d313107b-0d32-409f-9db3-40478860971f  →  smartfork fork-v2               │
+│ d313107b-0d32-40                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — INFO:     127.0.0.1:36724 - "GET                  │
+│ /api/judgments?sk...                                                        │
+│ 🕐 5 months ago (34 min) | ⚡ 44% match                                     │
+│ ") => {                                                                     │
+│                                                                             │
+│   const [showFilters, setShowFilters] = useState(false);                    │
+│                                                                             │
+│   // Sync internal state with prop changes                                  │
+│   useEffect"                                                                │
+│ Why: Contains reasoning/decisions | Domains: backend, database, frontend |  │
+│ Files: acts.py, acts.py, .env                                               │
+│ 🔑 fdb1ce0f-d30a-48f8-9257-8c59c2041c91  →  smartfork fork-v2               │
+│ fdb1ce0f-d30a-48                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+Use smartfork fork-v2 <session_id> --intent continue|reference|debug
+2026-03-22 23:38:44 | INFO     | smartfork.search.query_decomposer:get_spacy_nlp:87 - Loading spaCy english model (en_core_web_sm)...
+
+  ⏱ Query time: 8.4s
+
+────────────────────────────────────────────────────────────────────────────────
+  Query 5/10: "what was I working on last week"
+────────────────────────────────────────────────────────────────────────────────
+
+▪Query: what was I working on last week
+Intent: temporal_lookup | Topic: N/A | Project: langchain_rag_engine | 
+Decomposer: rule-based
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — pls code through current dir and review all the   │
+│ co...                                                                       │
+│ 🕐 6 months ago (3047 min) | ⚡ 62% match                                   │
+│ "supabase_schema.md                                                         │
+│                                                                             │
+│ > 'sub' = id::text);                                                        │
+│                                                                             │
+│ CREATE POLICY "Users can update own profile" ON users                       │
+│     FOR UPDATE USING (au"                                                   │
+│ Why: Contains reasoning/decisions | Domains: backend, database, devops |    │
+│ Files: DEPLOYMENT_LOG.md, DEPLOYMENT_LOG.md, supabase_schema.md             │
+│ 🔑 6c0d2fd2-5af0-4994-99c4-2ae1dae514ef  →  smartfork fork-v2               │
+│ 6c0d2fd2-5af0-49                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — Please review my codebase for the full-stack AI   │
+│ bo...                                                                       │
+│ 🕐 6 months ago (166 min) | ⚡ 61% match                                    │
+│ "## 📋 **Conversation Summary**                                             │
+│                                                                             │
+│ ### **Context: Production Readiness Implementation for BharatLaw AI**       │
+│                                                                             │
+│ This conversation "                                                         │
+│ Why: Contains reasoning/decisions | Domains: auth, backend, database |      │
+│ Files: migrate_performance_indexes.py, config.py, config.py                 │
+│ 🔑 d5673f1d-71fe-4bd8-b4c7-d0bde815b7a5  →  smartfork fork-v2               │
+│ d5673f1d-71fe-4b                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — INFO:     127.0.0.1:36724 - "GET                  │
+│ /api/judgments?sk...                                                        │
+│ 🕐 5 months ago (34 min) | ⚡ 61% match                                     │
+│ ") => {                                                                     │
+│                                                                             │
+│   const [showFilters, setShowFilters] = useState(false);                    │
+│                                                                             │
+│   // Sync internal state with prop changes                                  │
+│   useEffect"                                                                │
+│ Why: Contains reasoning/decisions | Domains: backend, database, frontend |  │
+│ Files: acts.py, acts.py, .env                                               │
+│ 🔑 fdb1ce0f-d30a-48f8-9257-8c59c2041c91  →  smartfork fork-v2               │
+│ fdb1ce0f-d30a-48                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — Implement comprehensive structured logging        │
+│ system...                                                                   │
+│ 🕐 6 months ago (11 min) | ⚡ 60% match                                     │
+│ "0 else "limited",                                                          │
+│             "available_providers": status["available_count"],               │
+│             "total_providers": status["t"                                   │
+│ Why: Contains reasoning/decisions | Domains: backend, frontend | Files:     │
+│ logging_config.py, requirements.txt, logger.py                              │
+│ 🔑 61471f55-82c1-4b09-89a9-8fbf186c34fa  →  smartfork fork-v2               │
+│ 61471f55-82c1-4b                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — Optimize database queries, add performance        │
+│ indexes...                                                                  │
+│ 🕐 6 months ago (6 min) | ⚡ 60% match                                      │
+│ "The user wants me to optimize database queries, add performance indexes,   │
+│ and implement query optimization strategies. Th"                            │
+│ Why: Contains reasoning/decisions | Domains: backend, database, rag |       │
+│ Files: migrate_performance_indexes.py, crud_optimized.py, query_cache.py    │
+│ 🔑 881d844e-c151-4677-9127-b24aa653e917  →  smartfork fork-v2               │
+│ 881d844e-c151-46                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+Use smartfork fork-v2 <session_id> --intent continue|reference|debug
+2026-03-22 23:38:53 | INFO     | smartfork.search.query_decomposer:get_spacy_nlp:87 - Loading spaCy english model (en_core_web_sm)...
+
+  ⏱ Query time: 8.5s
+
+────────────────────────────────────────────────────────────────────────────────
+  Query 6/10: "why did I choose JWT"
+────────────────────────────────────────────────────────────────────────────────
+
+▪Query: why did I choose JWT
+Intent: decision_hunting | Topic: jwt | Project: langchain_rag_engine | 
+Decomposer: rule-based
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — Create a secure secret key generation utility     │
+│ and...                                                                      │
+│ 🕐 6 months ago (7 min) | ⚡ 62% match                                      │
+│ "= 64 else "medium" if len(config.secret_key) >= 32 else "weak",            │
+│             "jwt_algorithm": config.jwt_algorithm,                          │
+│      "                                                                      │
+│ Why: Contains reasoning/decisions | Domains: auth, backend | Files:         │
+│ secret_key_generator.py, config.py, config.py                               │
+│ 🔑 e629fa72-4640-46d2-b164-bd2a736c9e4b  →  smartfork fork-v2               │
+│ e629fa72-4640-46                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — refer this doc to deploy over fast api on         │
+│ railways...                                                                 │
+│ 🕐 6 months ago (20 min) | ⚡ 56% match                                     │
+│ "First, the user wants to deploy a FastAPI app on Railway, referring to the │
+│ doc: https://docs.railway.com/guides/fastapi                                │
+│ "                                                                           │
+│ Why: Contains reasoning/decisions | Domains: auth, backend, database |      │
+│ Files: .gitignore, __init__.py, main.py                                     │
+│ 🔑 559881ca-6478-4178-b53a-d8e93e29ebe2  →  smartfork fork-v2               │
+│ 559881ca-6478-41                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — Create comprehensive input validation middleware  │
+│ a...                                                                        │
+│ 🕐 6 months ago (4 min) | ⚡ 55% match                                      │
+│ "The user wants me to create comprehensive input validation middleware and  │
+│ security headers for API protection. Looking a"                             │
+│ Why: Contains reasoning/decisions | Domains: auth, backend, testing |       │
+│ Files: security_middleware.py, main.py, main.py                             │
+│ 🔑 073b472f-7158-4ed1-a01a-4cbc6f822329  →  smartfork fork-v2               │
+│ 073b472f-7158-4e                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — Enhance security middleware with comprehensive    │
+│ sec...                                                                      │
+│ 🕐 6 months ago (12 min) | ⚡ 55% match                                     │
+│ "The user wants me to enhance security middleware with comprehensive        │
+│ security headers, CORS configuration, and vulnerabil"                       │
+│ Why: Contains reasoning/decisions | Domains: backend, testing | Files:      │
+│ security_middleware.py, main.py, security_middleware.py                     │
+│ 🔑 da63ff1a-d2f4-497d-94bf-a96ff6358b47  →  smartfork fork-v2               │
+│ da63ff1a-d2f4-49                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — our service running fine but for accessing it we  │
+│ n...                                                                        │
+│ 🕐 6 months ago (39 min) | ⚡ 55% match                                     │
+│ "First, the user is asking about networking options for their backend on    │
+│ Railway. The service is running fine, but they n"                           │
+│ Why: Contains reasoning/decisions | Domains: auth, backend, database |      │
+│ Files: main.py, main.py, main.py                                            │
+│ 🔑 e1ef17db-2fd4-4ce6-83e7-40645a13f79d  →  smartfork fork-v2               │
+│ e1ef17db-2fd4-4c                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+Use smartfork fork-v2 <session_id> --intent continue|reference|debug
+2026-03-22 23:39:01 | INFO     | smartfork.search.query_decomposer:get_spacy_nlp:87 - Loading spaCy english model (en_core_web_sm)...
+
+  ⏱ Query time: 8.4s
+
+────────────────────────────────────────────────────────────────────────────────
+  Query 7/10: "pagination logic"
+────────────────────────────────────────────────────────────────────────────────
+
+▪Query: pagination logic
+Intent: vague_memory | Topic: N/A | Project: all | Decomposer: rule-based
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 backend — kindly analysis our current codebase and unudersta...          │
+│ 🕐 3 weeks ago (1 min) | ⚡ 62% match                                       │
+│ "I'll analyze your codebase to understand what you're building. Let me      │
+│ start by examining the key files."                                          │
+│ Why: Contains reasoning/decisions | Domains: backend, frontend, ingest      │
+│ 🔑 019ca899-6d44-7392-b860-50f1b0788e96  →  smartfork fork-v2               │
+│ 019ca899-6d44-73                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — INFO:     127.0.0.1:36724 - "GET                  │
+│ /api/judgments?sk...                                                        │
+│ 🕐 5 months ago (34 min) | ⚡ 61% match                                     │
+│ ") => {                                                                     │
+│                                                                             │
+│   const [showFilters, setShowFilters] = useState(false);                    │
+│                                                                             │
+│   // Sync internal state with prop changes                                  │
+│   useEffect"                                                                │
+│ Why: Contains reasoning/decisions | Domains: backend, database, frontend |  │
+│ Files: acts.py, acts.py, .env                                               │
+│ 🔑 fdb1ce0f-d30a-48f8-9257-8c59c2041c91  →  smartfork fork-v2               │
+│ fdb1ce0f-d30a-48                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 smartfork — Implement Progress Indicators for SmartFork indexi...        │
+│ 🕐 2 weeks ago (23 min) | ⚡ 61% match                                      │
+│ "I'll implement the progress indicators for the SmartFork indexing command. │
+│ Let me start by examining the existing codeba"                              │
+│ Why: Contains reasoning/decisions | Domains: backend | Files: __init__.py,  │
+│ progress.py, cli.py                                                         │
+│ 🔑 019cb059-4a02-774c-b2f1-a0df321da7ff  →  smartfork fork-v2               │
+│ 019cb059-4a02-77                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 smartfork — Fix the Rich Live display rendering error in Smart...        │
+│ 🕐 2 weeks ago (4 min) | ⚡ 60% match                                       │
+│ "I'll start by reading the current progress.py file to understand the exact │
+│ implementation and identify the issues."                                    │
+│ Why: Contains reasoning/decisions | Domains: backend, testing | Files:      │
+│ progress.py, test_progress_fix.py, progress.py                              │
+│ 🔑 019cb2f9-d570-712e-af11-4d1aa7f2dc26  →  smartfork fork-v2               │
+│ 019cb2f9-d570-71                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 smartfork — okk now understand our codebase ...                          │
+│ will give u so...                                                           │
+│ 🕐 2 weeks ago (601 min) | ⚡ 60% match                                     │
+│ "I'll start by exploring the codebase to understand its structure and       │
+│ purpose. Let me read the key documentation and sour"                        │
+│ Why: Contains reasoning/decisions | Domains: backend, database, rag |       │
+│ Files: interactive.py, cli.py, cli.py                                       │
+│ 🔑 019cc704-e262-7399-9280-85452be37648  →  smartfork fork-v2               │
+│ 019cc704-e262-73                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+Use smartfork fork-v2 <session_id> --intent continue|reference|debug
+2026-03-22 23:39:10 | INFO     | smartfork.search.query_decomposer:get_spacy_nlp:87 - Loading spaCy english model (en_core_web_sm)...
+
+  ⏱ Query time: 8.5s
+
+────────────────────────────────────────────────────────────────────────────────
+  Query 8/10: "kafka consumer error"
+────────────────────────────────────────────────────────────────────────────────
+
+▪Query: kafka consumer error
+Intent: error_recall | Topic: N/A | Project: all | Decomposer: rule-based
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 langchain_rag_engine — INFO:     127.0.0.1:36724 - "GET                  │
+│ /api/judgments?sk...                                                        │
+│ 🕐 5 months ago (34 min) | ⚡ 62% match                                     │
+│ ") => {                                                                     │
+│                                                                             │
+│   const [showFilters, setShowFilters] = useState(false);                    │
+│                                                                             │
+│   // Sync internal state with prop changes                                  │
+│   useEffect"                                                                │
+│ Why: Contains reasoning/decisions | Domains: backend, database, frontend |  │
+│ Files: acts.py, acts.py, .env                                               │
+│ 🔑 fdb1ce0f-d30a-48f8-9257-8c59c2041c91  →  smartfork fork-v2               │
+│ fdb1ce0f-d30a-48                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 smartfork — Fix the Rich Live display rendering error in Smart...        │
+│ 🕐 2 weeks ago (4 min) | ⚡ 61% match                                       │
+│ "I'll start by reading the current progress.py file to understand the exact │
+│ implementation and identify the issues."                                    │
+│ Why: Contains reasoning/decisions | Domains: backend, testing | Files:      │
+│ progress.py, test_progress_fix.py, progress.py                              │
+│ 🔑 019cb2f9-d570-712e-af11-4d1aa7f2dc26  →  smartfork fork-v2               │
+│ 019cb2f9-d570-71                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 backend — hi                                                             │
+│ 🕐 4 months ago (9 min) | ⚡ 61% match                                      │
+│ "First, the user's message is just "hi". That's a greeting, not a specific  │
+│ task.                                                                       │
+│                                                                             │
+│                                                                             │
+│ ## Interpreting user input                                                  │
+│ - The use"                                                                  │
+│ Why: Contains reasoning/decisions | Domains: backend, ingest | Files:       │
+│ pipelines.py, oaktree_spider.py, bitmex_spider.py                           │
+│ 🔑 92aaf234-0ab7-44f9-b46f-8fd13989ac65  →  smartfork fork-v2               │
+│ 92aaf234-0ab7-44                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 bharatlaw-frontend — check our frontend is not redering perfectly i      │
+│ am...                                                                       │
+│ 🕐 5 months ago (20 min) | ⚡ 60% match                                     │
+│ "@layer base {                                                              │
+│   * {                                                                       │
+│     @apply border-gray-700;                                                 │
+│                                                                             │
+│   html {                                                                    │
+│     scroll-behavior: smooth;                                                │
+│                                                                             │
+│   body {                                                                    │
+│     @apply bg-black tex"                                                    │
+│ Why: Contains reasoning/decisions | Domains: backend, frontend              │
+│ 🔑 dcf3831b-549c-499e-a2f7-6b582811cbd3  →  smartfork fork-v2               │
+│ dcf3831b-549c-49                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 backend — kindly analysis our current codebase and unudersta...          │
+│ 🕐 3 weeks ago (1 min) | ⚡ 60% match                                       │
+│ "I'll analyze your codebase to understand what you're building. Let me      │
+│ start by examining the key files."                                          │
+│ Why: Contains reasoning/decisions | Domains: backend, frontend, ingest      │
+│ 🔑 019ca899-6d44-7392-b860-50f1b0788e96  →  smartfork fork-v2               │
+│ 019ca899-6d44-73                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+Use smartfork fork-v2 <session_id> --intent continue|reference|debug
+2026-03-22 23:39:18 | INFO     | smartfork.search.query_decomposer:get_spacy_nlp:87 - Loading spaCy english model (en_core_web_sm)...
+
+  ⏱ Query time: 8.2s
+
+────────────────────────────────────────────────────────────────────────────────
+  Query 9/10: "hybrid search implementation"
+────────────────────────────────────────────────────────────────────────────────
+
+▪Query: hybrid search implementation
+Intent: implementation_lookup | Topic: N/A | Project: all | Decomposer: 
+rule-based
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 CapsuleUnlock — Integrate the frontend with the smart contract for...    │
+│ 🕐 5 months ago (0 min) | ⚡ 62% match                                      │
+│ "First, the task is to integrate the frontend with the smart contract for   │
+│ Phase 4 of the CapsuleUnlock project. This invo"                            │
+│ Why: Contains reasoning/decisions | Domains: frontend                       │
+│ 🔑 b80a09fd-3905-42be-aa29-c4eae028b10a  →  smartfork fork-v2               │
+│ b80a09fd-3905-42                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 unknown_project — hi pls check our codebase of my portfolio analyse...   │
+│ 🕐 5 months ago (4261 min) | ⚡ 61% match                                   │
+│ "next.config.ts                                                             │
+│                                                                             │
+│ [Response interrupted by a tool use result. Only one tool may be used at a  │
+│ time and should be placed at "                                              │
+│ Why: Contains reasoning/decisions | Domains: frontend | Files:              │
+│ next.config.ts, layout.tsx, layout.tsx                                      │
+│ 🔑 c7b3648a-9a70-4df2-8611-c5c80d4d6249  →  smartfork fork-v2               │
+│ c7b3648a-9a70-4d                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 bharatlaw-frontend — check our frontend is not redering perfectly i      │
+│ am...                                                                       │
+│ 🕐 5 months ago (20 min) | ⚡ 61% match                                     │
+│ "@layer base {                                                              │
+│   * {                                                                       │
+│     @apply border-gray-700;                                                 │
+│                                                                             │
+│   html {                                                                    │
+│     scroll-behavior: smooth;                                                │
+│                                                                             │
+│   body {                                                                    │
+│     @apply bg-black tex"                                                    │
+│ Why: Contains reasoning/decisions | Domains: backend, frontend              │
+│ 🔑 dcf3831b-549c-499e-a2f7-6b582811cbd3  →  smartfork fork-v2               │
+│ dcf3831b-549c-49                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 backend — kindly analysis our current codebase and unudersta...          │
+│ 🕐 3 weeks ago (1 min) | ⚡ 60% match                                       │
+│ "I'll analyze your codebase to understand what you're building. Let me      │
+│ start by examining the key files."                                          │
+│ Why: Contains reasoning/decisions | Domains: backend, frontend, ingest      │
+│ 🔑 019ca899-6d44-7392-b860-50f1b0788e96  →  smartfork fork-v2               │
+│ 019ca899-6d44-73                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 frontend — review our codebase and improve our frontend UI/UX...         │
+│ 🕐 5 months ago (23 min) | ⚡ 60% match                                     │
+│ ""dependencies": {                                                          │
+│     "@hookform/resolvers": "^3.3.2",                                        │
+│     "@solana/wallet-adapter-base": "^0.9.23",                               │
+│     "@solana/wallet"                                                        │
+│ Why: Contains reasoning/decisions | Domains: frontend | Files:              │
+│ package.json, tailwind.config.js, Button.tsx                                │
+│ 🔑 7bee5498-48da-4286-a5d7-20da023fc2ac  →  smartfork fork-v2               │
+│ 7bee5498-48da-42                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+Use smartfork fork-v2 <session_id> --intent continue|reference|debug
+2026-03-22 23:39:26 | INFO     | smartfork.search.query_decomposer:get_spacy_nlp:87 - Loading spaCy english model (en_core_web_sm)...
+
+  ⏱ Query time: 8.2s
+
+────────────────────────────────────────────────────────────────────────────────
+  Query 10/10: "fix the scrollbar issue"
+────────────────────────────────────────────────────────────────────────────────
+
+▪Query: fix the scrollbar issue
+Intent: error_recall | Topic: N/A | Project: all | Decomposer: rule-based
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 unknown_project — hi pls check our codebase of my portfolio analyse...   │
+│ 🕐 5 months ago (4261 min) | ⚡ 62% match                                   │
+│ "next.config.ts                                                             │
+│                                                                             │
+│ [Response interrupted by a tool use result. Only one tool may be used at a  │
+│ time and should be placed at "                                              │
+│ Why: Contains reasoning/decisions | Domains: frontend | Files:              │
+│ next.config.ts, layout.tsx, layout.tsx                                      │
+│ 🔑 c7b3648a-9a70-4df2-8611-c5c80d4d6249  →  smartfork fork-v2               │
+│ c7b3648a-9a70-4d                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 bharatlaw-frontend — check our frontend is not redering perfectly i      │
+│ am...                                                                       │
+│ 🕐 5 months ago (20 min) | ⚡ 61% match                                     │
+│ "@layer base {                                                              │
+│   * {                                                                       │
+│     @apply border-gray-700;                                                 │
+│                                                                             │
+│   html {                                                                    │
+│     scroll-behavior: smooth;                                                │
+│                                                                             │
+│   body {                                                                    │
+│     @apply bg-black tex"                                                    │
+│ Why: Contains reasoning/decisions | Domains: backend, frontend              │
+│ 🔑 dcf3831b-549c-499e-a2f7-6b582811cbd3  →  smartfork fork-v2               │
+│ dcf3831b-549c-49                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 unknown_project — pls analyse my portfolio codebase                      │
+│ 🕐 5 months ago (194 min) | ⚡ 61% match                                    │
+│ "Data Engineer | AI Enthusiast | Building scalable data pipelines and       │
+│ intelligent systems                                                         │
+│                                                                             │
+│               AI Engineer"                                                  │
+│ Why: Contains reasoning/decisions | Domains: auth, backend, frontend |      │
+│ Files: layout.tsx, package.json, package.json                               │
+│ 🔑 b0d38093-44d4-4a80-b6a7-6c713b362731  →  smartfork fork-v2               │
+│ b0d38093-44d4-4a                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 unknown_project — i want to implement webgl-scroll-animation to my p...  │
+│ 🕐 5 months ago (333 min) | ⚡ 60% match                                    │
+│ "First, the user wants to implement WebGL scroll animation in their         │
+│ portfolio. They reference a doc: https://www.builder."                      │
+│ Why: Contains reasoning/decisions | Domains: frontend | Files:              │
+│ WebGLScrollBackground.tsx, WebGLScrollBackground.tsx, layout.tsx            │
+│ 🔑 a9c5baa1-334b-4050-ac64-2107033a6d8b  →  smartfork fork-v2               │
+│ a9c5baa1-334b-40                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 📁 smartfork — Fix the Rich Live display rendering error in Smart...        │
+│ 🕐 2 weeks ago (4 min) | ⚡ 60% match                                       │
+│ "I'll start by reading the current progress.py file to understand the exact │
+│ implementation and identify the issues."                                    │
+│ Why: Contains reasoning/decisions | Domains: backend, testing | Files:      │
+│ progress.py, test_progress_fix.py, progress.py                              │
+│ 🔑 019cb2f9-d570-712e-af11-4d1aa7f2dc26  →  smartfork fork-v2               │
+│ 019cb2f9-d570-71                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+Use smartfork fork-v2 <session_id> --intent continue|reference|debug
+2026-03-22 23:39:34 | INFO     | smartfork.search.query_decomposer:get_spacy_nlp:87 - Loading spaCy english model (en_core_web_sm)...
+
+  ⏱ Query time: 8.3s
+
+════════════════════════════════════════════════════════════════════════════════
+  BONUS: fork-v2 Test
+════════════════════════════════════════════════════════════════════════════════
+
+  Session: a9f2e542-0ac2-47e3-ab8a-62be8d5368bd
+  Command: smartfork fork-v2 a9f2e542-0ac2-47e3-ab8a-62be8d5368bd --intent reference
+
+▪┌───────────────────── Traceback (most recent call last) ─────────────────────┐
+│ in _run_module_as_main:198                                                  │
+│ in _run_code:88                                                             │
+│                                                                             │
+│ D:\SMART-FORK\smartfork\src\smartfork\cli.py:2526 in <module>               │
+│                                                                             │
+│   2523                                                                      │
+│   2524                                                                      │
+│   2525 if __name__ == "__main__":                                           │
+│ > 2526 │   app()                                                            │
+│   2527                                                                      │
+│                                                                             │
+│ C:\Users\amans\AppData\Roaming\Python\Python313\site-packages\typer\main.py │
+│ :1152 in __call__                                                           │
+│                                                                             │
+│ C:\Users\amans\AppData\Roaming\Python\Python313\site-packages\typer\main.py │
+│ :1135 in __call__                                                           │
+│                                                                             │
+│ C:\Users\amans\AppData\Roaming\Python\Python313\site-packages\click\core.py │
+│ :1442 in __call__                                                           │
+│                                                                             │
+│ C:\Users\amans\AppData\Roaming\Python\Python313\site-packages\typer\core.py │
+│ :795 in main                                                                │
+│                                                                             │
+│ C:\Users\amans\AppData\Roaming\Python\Python313\site-packages\typer\core.py │
+│ :188 in _main                                                               │
+│                                                                             │
+│ C:\Users\amans\AppData\Roaming\Python\Python313\site-packages\click\core.py │
+│ :1828 in invoke                                                             │
+│                                                                             │
+│ C:\Users\amans\AppData\Roaming\Python\Python313\site-packages\click\core.py │
+│ :1186 in make_context                                                       │
+│                                                                             │
+│ C:\Users\amans\AppData\Roaming\Python\Python313\site-packages\click\core.py │
+│ :1193 in parse_args                                                         │
+│                                                                             │
+│ C:\Users\amans\AppData\Roaming\Python\Python313\site-packages\click\core.py │
+│ :1055 in make_parser                                                        │
+│                                                                             │
+│ C:\Users\amans\AppData\Roaming\Python\Python313\site-packages\click\core.py │
+│ :2769 in add_to_parser                                                      │
+│                                                                             │
+│ C:\Users\amans\AppData\Roaming\Python\Python313\site-packages\click\parser. │
+│ py:281 in add_option                                                        │
+│                                                                             │
+│ C:\Users\amans\AppData\Roaming\Python\Python313\site-packages\click\parser. │
+│ py:145 in __init__                                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+ValueError: Invalid start character for option (Fork intent: continue, 
+reference, or debug)
+
+════════════════════════════════════════════════════════════════════════════════
+  Benchmark complete.
+════════════════════════════════════════════════════════════════════════════════

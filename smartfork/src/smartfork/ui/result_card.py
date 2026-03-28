@@ -50,15 +50,18 @@ def build_result_card(doc: SessionDocument, match_score: float,
     if snippet and len(snippet) > 120:
         snippet = snippet[:117] + "..."
     
-    # Build "why matched" explanation if not provided
+    # Build "why matched" explanation based on available document types
     if not why_matched:
         why_parts = []
-        if matched_doc_type == "reasoning_doc":
+        # If snippet came from reasoning, show reasoning match
+        if doc.reasoning_docs and snippet:
             why_parts.append("Contains reasoning/decisions")
-        elif matched_doc_type == "task_doc":
-            why_parts.append("Task description matches")
-        elif matched_doc_type == "summary_doc":
+        # If no reasoning but has summary, show summary match
+        elif doc.summary_doc:
             why_parts.append("Summary matches")
+        # Otherwise show task match
+        else:
+            why_parts.append("Task description matches")
         
         if doc.domains:
             why_parts.append(f"Domains: {', '.join(doc.domains[:3])}")

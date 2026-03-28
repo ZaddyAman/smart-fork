@@ -1,8 +1,13 @@
-"""Multi-collection ChromaDB vector index (v2).
+"""ChromaDB-based vector index (v2).
 
-Unlike v1 which had one collection with everything, v2 uses separate
-collections per document type so different doc types can be weighted
-differently at search time based on query intent.
+Replaced Qdrant with ChromaDB for reliable Windows persistence.
+Qdrant's embedded mode on Windows has a fatal bug: portalocker
+imports msvcrt for file locking, but Python tears down msvcrt
+during interpreter shutdown before the WAL can flush — data is
+silently lost every time.
+
+ChromaDB 1.0.20+ uses SQLite3 as its storage backend, which
+persists immediately and has zero Windows file-locking issues.
 
 Collections:
 - v2_task_docs: task descriptions with contextual prefix
@@ -10,10 +15,14 @@ Collections:
 - v2_reasoning_docs: AI reasoning/decision blocks
 """
 
-import chromadb
+import uuid
+import numpy as np
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from loguru import logger
+
+import chromadb
+from chromadb.config import Settings
 
 from ..database.models import SessionDocument, VectorResult
 from ..search.embedder import EmbeddingProvider
@@ -48,13 +57,23 @@ class VectorIndex:
             embedder: EmbeddingProvider instance for generating embeddings
         """
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.db_path.mkdir(parents=True, exist_ok=True)
         
-        self.client = chromadb.PersistentClient(path=str(self.db_path))
+        # Initialize ChromaDB client (persistent, local)
+        self.client = chromadb.PersistentClient(
+            path=str(self.db_path),
+            settings=Settings(
+                anonymized_telemetry=False,
+                allow_reset=True
+            )
+        )
         self.embedder = embedder
         self.chunker = ContextualChunker()
         
-        # Get or create collections
+        # Get embedding dimension from embedder
+        self.dimensions = getattr(embedder, 'dimensions', 512)
+        
+        # Create or get collections
         self.task_collection = self.client.get_or_create_collection(
             name=TASK_COLLECTION,
             metadata={"hnsw:space": "cosine"}
@@ -69,7 +88,19 @@ class VectorIndex:
         )
         
         self.noise_embeddings = []
-        logger.debug(f"VectorIndex initialized at {db_path}")
+        logger.debug(f"VectorIndex initialized at {db_path} (ChromaDB backend)")
+    
+    def _get_collection(self, doc_type: str):
+        """Map doc_type to ChromaDB collection object."""
+        mapping = {
+            "task": self.task_collection,
+            "task_doc": self.task_collection,
+            "summary": self.summary_collection,
+            "summary_doc": self.summary_collection,
+            "reasoning": self.reasoning_collection,
+            "reasoning_doc": self.reasoning_collection,
+        }
+        return mapping.get(doc_type, self.task_collection)
 
     def _get_noise_embeddings(self) -> List[List[float]]:
         """Lazy load noise prototype embeddings for cosine filtering."""
@@ -109,12 +140,13 @@ class VectorIndex:
         summary_doc = self.chunker.build_summary_doc(doc)
         reasoning_chunks = self.chunker.build_reasoning_docs(doc)
         
-        # ── BATCH EMBED + STORE: task_doc ──
+        # ── INDEX: task_doc ──
         if task_doc:
             try:
                 embedding = self.embedder.embed(task_doc, "task_doc")
+                doc_id = f"{doc.session_id}_task_0"
                 self.task_collection.add(
-                    ids=[f"{doc.session_id}_task_0"],
+                    ids=[doc_id],
                     embeddings=[embedding],
                     documents=[task_doc],
                     metadatas=[{
@@ -128,12 +160,13 @@ class VectorIndex:
             except Exception as e:
                 logger.warning(f"Failed to index task_doc for {doc.session_id}: {e}")
         
-        # ── BATCH EMBED + STORE: summary_doc ──
+        # ── INDEX: summary_doc ──
         if summary_doc:
             try:
                 embedding = self.embedder.embed(summary_doc, "summary_doc")
+                doc_id = f"{doc.session_id}_summary_0"
                 self.summary_collection.add(
-                    ids=[f"{doc.session_id}_summary_0"],
+                    ids=[doc_id],
                     embeddings=[embedding],
                     documents=[summary_doc],
                     metadatas=[{
@@ -147,24 +180,21 @@ class VectorIndex:
             except Exception as e:
                 logger.warning(f"Failed to index summary_doc for {doc.session_id}: {e}")
         
-        # ── BATCH EMBED + STORE: reasoning_docs (the big win) ──
+        # ── INDEX: reasoning_docs ──
         if reasoning_chunks:
             try:
                 texts_to_embed = [chunk["text"] for chunk in reasoning_chunks]
-                ids = [chunk["id"] for chunk in reasoning_chunks]
                 
-                # Single batch embed call instead of N individual calls
+                # Single batch embed call
                 embeddings = self.embedder.embed_batch(texts_to_embed, "reasoning_doc")
                 
-                # Semantic Denoising - Cosine Pre-Filter (Phase 8)
+                # Semantic Denoising - Cosine Pre-Filter
                 noise_embs = self._get_noise_embeddings()
                 
                 valid_ids = []
                 valid_embeddings = []
-                valid_docs = []
-                valid_metas = []
-                
-                import numpy as np
+                valid_documents = []
+                valid_metadatas = []
                 seen_parents = set()
                 
                 for i, chunk in enumerate(reasoning_chunks):
@@ -183,15 +213,16 @@ class VectorIndex:
                                     break
                     
                     if not is_noise:
-                        valid_ids.append(ids[i])
+                        doc_id = f"{doc.session_id}_reasoning_{chunk['chunk_index']}"
+                        valid_ids.append(doc_id)
                         valid_embeddings.append(embeddings[i])
-                        valid_docs.append(texts_to_embed[i])
-                        valid_metas.append({
+                        valid_documents.append(texts_to_embed[i])
+                        valid_metadatas.append({
                             "session_id": doc.session_id,
                             "doc_type": "reasoning_doc",
                             "project_name": doc.project_name,
                             "chunk_index": chunk["chunk_index"],
-                            "parent_id": chunk["parent_id"]
+                            "parent_id": chunk["parent_id"],
                         })
                         
                         if store:
@@ -204,17 +235,20 @@ class VectorIndex:
                                     full_raw_text=chunk["full_raw_text"]
                                 )
                                 seen_parents.add(pid)
-                                
-                if not valid_docs:
-                    counts["reasoning"] = 0
-                else:
-                    self.reasoning_collection.add(
-                        ids=valid_ids,
-                        embeddings=valid_embeddings,
-                        documents=valid_docs,
-                        metadatas=valid_metas,
-                    )
-                    counts["reasoning"] = len(valid_docs)
+                
+                if valid_ids:
+                    # ChromaDB handles batching internally, but we chunk
+                    # to stay under any per-call limits
+                    batch_size = 500
+                    for b in range(0, len(valid_ids), batch_size):
+                        end = b + batch_size
+                        self.reasoning_collection.add(
+                            ids=valid_ids[b:end],
+                            embeddings=valid_embeddings[b:end],
+                            documents=valid_documents[b:end],
+                            metadatas=valid_metadatas[b:end],
+                        )
+                    counts["reasoning"] = len(valid_ids)
             except Exception as e:
                 logger.warning(f"Failed to batch index reasoning_docs for {doc.session_id}: {e}")
         
@@ -241,29 +275,26 @@ class VectorIndex:
             List of VectorResult objects sorted by score (highest first)
         """
         collection = self._get_collection(doc_type)
-        if collection is None:
-            return []
         
         # Build where filter for session_id constraint
-        where = None
+        where_filter = None
         if session_ids:
             if len(session_ids) == 1:
-                where = {"session_id": session_ids[0]}
+                where_filter = {"session_id": session_ids[0]}
             else:
-                where = {"session_id": {"$in": session_ids}}
+                where_filter = {"session_id": {"$in": session_ids}}
         
         try:
-            # Limit n_results to collection size to avoid ChromaDB errors
-            collection_count = collection.count()
-            effective_n = min(n_results, collection_count) if collection_count > 0 else 0
-            
-            if effective_n == 0:
+            # Clamp n_results to collection count to avoid ChromaDB errors
+            count = collection.count()
+            if count == 0:
                 return []
+            effective_n = min(n_results, count)
             
             results = collection.query(
                 query_embeddings=[query_embedding],
                 n_results=effective_n,
-                where=where,
+                where=where_filter,
                 include=["documents", "metadatas", "distances"]
             )
             
@@ -312,18 +343,19 @@ class VectorIndex:
         Args:
             session_id: Session ID to delete
         """
-        for collection in [self.task_collection, self.summary_collection, 
-                          self.reasoning_collection]:
+        for collection in [self.task_collection, self.summary_collection, self.reasoning_collection]:
             try:
-                # Get IDs for this session
-                results = collection.get(
+                # Check if there are any docs with this session_id before deleting
+                existing = collection.get(
                     where={"session_id": session_id},
-                    include=[]
+                    limit=1
                 )
-                if results["ids"]:
-                    collection.delete(ids=results["ids"])
+                if existing and existing["ids"]:
+                    collection.delete(
+                        where={"session_id": session_id}
+                    )
             except Exception as e:
-                logger.debug(f"Delete from collection failed (may be empty): {e}")
+                logger.debug(f"Delete from {collection.name} failed: {e}")
     
     def get_stats(self) -> Dict[str, int]:
         """Get document counts per collection.
@@ -343,61 +375,55 @@ class VectorIndex:
     
     def reset(self) -> None:
         """Delete all collections and recreate them. Use with caution."""
-        self.client.delete_collection(TASK_COLLECTION)
-        self.client.delete_collection(SUMMARY_COLLECTION)
-        self.client.delete_collection(REASONING_COLLECTION)
+        for name in [TASK_COLLECTION, SUMMARY_COLLECTION, REASONING_COLLECTION]:
+            try:
+                self.client.delete_collection(name)
+            except Exception:
+                pass
         
+        # Recreate collections
         self.task_collection = self.client.get_or_create_collection(
-            name=TASK_COLLECTION, metadata={"hnsw:space": "cosine"})
+            name=TASK_COLLECTION,
+            metadata={"hnsw:space": "cosine"}
+        )
         self.summary_collection = self.client.get_or_create_collection(
-            name=SUMMARY_COLLECTION, metadata={"hnsw:space": "cosine"})
+            name=SUMMARY_COLLECTION,
+            metadata={"hnsw:space": "cosine"}
+        )
         self.reasoning_collection = self.client.get_or_create_collection(
-            name=REASONING_COLLECTION, metadata={"hnsw:space": "cosine"})
-        
+            name=REASONING_COLLECTION,
+            metadata={"hnsw:space": "cosine"}
+        )
         logger.warning("VectorIndex reset — all collections cleared")
     
-    def _get_collection(self, doc_type: str):
-        """Get the ChromaDB collection for a document type."""
-        mapping = {
-            "task": self.task_collection,
-            "task_doc": self.task_collection,
-            "summary": self.summary_collection,
-            "summary_doc": self.summary_collection,
-            "reasoning": self.reasoning_collection,
-            "reasoning_doc": self.reasoning_collection,
-        }
-        return mapping.get(doc_type)
-    
-    def _format_results(self, results: Dict[str, Any],
-                         doc_type: str) -> List[VectorResult]:
+    def _format_results(self, results: Dict[str, Any], doc_type: str) -> List[VectorResult]:
         """Format ChromaDB query results into VectorResult objects.
         
-        ChromaDB returns distances (lower = more similar for cosine).
-        We convert to similarity scores (higher = more similar).
+        ChromaDB returns cosine *distance* (0 = identical, 2 = opposite).
+        We convert to similarity: score = 1.0 - (distance / 2.0).
         """
         vector_results = []
         
         if not results or not results.get("ids") or not results["ids"][0]:
-            return []
+            return vector_results
         
         ids = results["ids"][0]
-        documents = results.get("documents", [[]])[0]
-        metadatas = results.get("metadatas", [[]])[0]
-        distances = results.get("distances", [[]])[0]
+        documents = results.get("documents", [[]])[0] or []
+        distances = results.get("distances", [[]])[0] or []
+        metadatas = results.get("metadatas", [[]])[0] or []
         
-        for i, doc_id in enumerate(ids):
-            meta = metadatas[i] if i < len(metadatas) else {}
-            doc = documents[i] if i < len(documents) else ""
-            dist = distances[i] if i < len(distances) else 1.0
+        for i in range(len(ids)):
+            # Convert cosine distance to similarity score
+            score = 1.0 - (distances[i] / 2.0) if i < len(distances) else 0.0
             
-            # Convert cosine distance to similarity: similarity = 1 - distance
-            similarity = max(0.0, 1.0 - dist)
+            meta = metadatas[i] if i < len(metadatas) else {}
+            content = documents[i] if i < len(documents) else ""
             
             vector_results.append(VectorResult(
                 session_id=meta.get("session_id", ""),
                 doc_type=doc_type,
-                content=doc,
-                score=similarity,
+                content=content,
+                score=max(0.0, score),
                 chunk_index=meta.get("chunk_index", 0),
                 parent_id=meta.get("parent_id")
             ))

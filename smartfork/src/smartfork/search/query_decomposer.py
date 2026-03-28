@@ -74,30 +74,13 @@ TIME_HINT_MAP = {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# GLOBAL MODELS (Cold-start fix for persistent MCP process)
+# GLOBAL MODELS (spaCy for time extraction only)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_gliner_model = None
-_intent_classifier = None
 _spacy_nlp = None
 
-def get_gliner():
-    global _gliner_model
-    if _gliner_model is None:
-        from gliner import GLiNER
-        logger.info("Loading GLiNER model (gliner-medium-v2.1)...")
-        _gliner_model = GLiNER.from_pretrained("urchade/gliner_medium-v2.1")
-    return _gliner_model
-
-def get_intent_classifier():
-    global _intent_classifier
-    if _intent_classifier is None:
-        from transformers import pipeline
-        logger.info("Loading DeBERTa Intent Classifier (nli-deberta-v3-xsmall)...")
-        _intent_classifier = pipeline("zero-shot-classification", model="cross-encoder/nli-deberta-v3-xsmall")
-    return _intent_classifier
-
 def get_spacy_nlp():
+    """Returns spaCy model for time extraction only."""
     global _spacy_nlp
     if _spacy_nlp is None:
         import spacy
@@ -107,6 +90,93 @@ def get_spacy_nlp():
         patterns = [{"label": "TIME_HINT", "pattern": p} for p in TIME_HINT_MAP.keys()]
         ruler.add_patterns(patterns)
     return _spacy_nlp
+
+
+def extract_entities_from_query(query: str, known_projects: list[str]) -> dict:
+    """Fast rule-based entity extraction without ML models.
+    
+    - Project: fuzzy match against known projects from SQLite
+    - Topic: regex for CamelCase/CAPS terms (JWT, ChromaDB, FastAPI)
+    - File: regex for known extensions
+    """
+    import re
+    from difflib import get_close_matches
+    
+    query_lower = query.lower()
+    
+    # Step 1: Project extraction - match against known projects
+    # Handles: exact match, partial match (bharatlaw -> bharatlaw-frontend)
+    project = None
+    for proj in known_projects:
+        if proj and proj.lower() in query_lower:
+            project = proj
+            break
+    
+    # Try partial match: query contains "bharatlaw" -> matches "bharatlaw-frontend"
+    if not project and known_projects:
+        for proj in known_projects:
+            if proj:
+                # Split project name into parts: bharatlaw-frontend -> [bharatlaw, frontend]
+                proj_parts = proj.lower().replace("-", " ").replace("_", " ").split()
+                for part in proj_parts:
+                    if len(part) >= 4 and part in query_lower:  # require at least 4 chars
+                        project = proj
+                        break
+                if project:
+                    break
+    
+    # Last resort: fuzzy match
+    if not project and known_projects:
+        words = query.split()
+        for word in words:
+            word_clean = word.lower().replace("-", " ").replace("_", " ")
+            for proj in known_projects:
+                if proj:
+                    proj_clean = proj.lower().replace("-", " ").replace("_", " ")
+                    if word_clean in proj_clean or proj_clean in word_clean:
+                        project = proj
+                        break
+            if project:
+                break
+    
+    # Step 2: Topic/technology extraction - regex for CamelCase/CAPS
+    # But filter out any matches that are project names (or partial matches)
+    tech_pattern = re.compile(r'\b[A-Z][a-zA-Z0-9]*(?:[A-Z][a-zA-Z0-9]*)+\b|\b[A-Z]{2,}\b')
+    tech_matches = tech_pattern.findall(query)
+    stopwords = {"I", "API", "UI", "URL", "SQL", "THE", "AND", "OR", "FOR", "NOT"}
+    
+    # Filter out project names and stopwords
+    filtered_tech = []
+    for t in tech_matches:
+        t_lower = t.lower()
+        # Skip if it's a stopword
+        if t_lower in [s.lower() for s in stopwords]:
+            continue
+        # Skip if it matches any known project (check partial matches too)
+        is_project = False
+        for proj in known_projects:
+            if proj:
+                proj_clean = proj.lower().replace("-", " ").replace("_", " ")
+                # Check both directions: term in project OR project in term
+                if t_lower == proj.lower() or t_lower in proj_clean or proj_clean in t_lower:
+                    is_project = True
+                    break
+        if is_project:
+            continue
+        filtered_tech.append(t)
+    
+    topic = filtered_tech[0].lower() if filtered_tech else None
+    
+    # Step 3: File extraction - known extensions
+    file_pattern = re.compile(r'\b\w+\.(py|ts|tsx|js|go|java|css|md|json|yaml|yml|toml)\b')
+    file_match = file_pattern.search(query)
+    file_hint = file_match.group(0) if file_match else None
+    
+    return {
+        "project": project,
+        "topic": topic,
+        "file_hint": file_hint,
+    }
 
 
 class QueryDecomposer:
@@ -125,46 +195,115 @@ class QueryDecomposer:
                  known_projects: Optional[List[str]] = None):
         self.llm = llm
         self.known_projects = known_projects or []
+        
+        # Rule-based intent keywords (fast, no ML)
+        self.INTENT_KEYWORDS = {
+            "error_recall": [
+                "bug", "error", "fix", "broke", "failed", "exception",
+                "issue", "crash", "wrong", "broken", "debug", "traceback",
+                "not working", "doesn't work", "problem"
+            ],
+            "decision_hunting": [
+                "why", "decided", "chose", "reason", "approach", "instead",
+                "rationale", "thought", "consideration", "trade-off", "versus",
+                "decisions", "decision", "picked", "selected", "went with"
+            ],
+            "file_lookup": [
+                ".py", ".ts", ".tsx", ".js", ".go", ".java", "file", "module",
+                "component", "class", "function", "method"
+            ],
+            "temporal_lookup": [
+                "yesterday", "last week", "last month", "ago", "recently",
+                "today", "this week", "earlier", "before", "previous"
+            ],
+            "implementation_lookup": [
+                "how", "implement", "built", "created", "code for", "setup",
+                "configure", "install", "integrate", "add", "write", "structure"
+            ],
+            "pattern_hunting": [
+                "all sessions", "every time", "whenever", "pattern", "approach",
+                "usually", "always", "across", "multiple", "all my"
+            ],
+        }
     
+    def _rule_based_intent(self, query: str) -> str:
+        """Fast rule-based intent classification (<5ms)."""
+        query_lower = query.lower()
+        scores = {}
+        
+        for intent, keywords in self.INTENT_KEYWORDS.items():
+            scores[intent] = sum(1 for kw in keywords if kw in query_lower)
+        
+        # Return the highest scorer - keyword lists are specific enough now
+        best_intent = max(scores, key=scores.get)
+        if scores[best_intent] == 0:
+            return "vague_memory"
+        
+        return best_intent
+
     def decompose(self, query: str) -> QueryDecomposition:
         """Decompose a raw query into structured components.
         
-        Tries ML (GLiNER + DeBERTa) first, falls back to rule-based extraction on failure.
-        Always runs fuzzy project matching against known indexed projects.
+        Uses rule-based extraction for all entities:
+        - Intent: keyword matching
+        - Project: fuzzy match against known projects
+        - Topic: CamelCase/CAPS regex
+        - File: extension regex
+        - Time: spaCy NER
         """
         if not query or not query.strip():
             return QueryDecomposition(intent="vague_memory")
         
-        # Try zero-shot ML decomposition first (fast, primary path)
-        result = self._ml_decompose(query)
-        if result:
-            # Post-process: fuzzy match the extracted project against indexed names
-            if result.project:
-                matched = self._fuzzy_match_project(result.project)
-                if matched:
-                    result.project = matched
-            elif not result.project:
-                # ML didn't extract a project, try fuzzy matching raw query
-                matched = self._fuzzy_match_project_from_query(query)
-                if matched:
-                    result.project = matched
-            return result
+        # Get known projects (cached)
+        known_projects = self.known_projects or []
         
-        # Fallback to rule-based
-        return self._rule_based_decompose(query)
+        # Rule-based intent classification
+        intent = self._rule_based_intent(query)
+        
+        # Rule-based entity extraction
+        entities = extract_entities_from_query(query, known_projects)
+        
+        # spaCy for time hints only
+        time_hint = None
+        try:
+            nlp = get_spacy_nlp()
+            doc = nlp(query.lower())
+            for ent in doc.ents:
+                if ent.label_ == "TIME_HINT":
+                    time_hint = TIME_HINT_MAP.get(ent.text, ent.text.replace(' ', '_'))
+                    break
+        except Exception:
+            pass
+        
+        # Extract tech terms from query
+        tech_terms = []
+        import re
+        tech_pattern = re.compile(r'\b[A-Z][a-zA-Z0-9]*(?:[A-Z][a-zA-Z0-9]*)+\b|\b[A-Z]{2,}\b')
+        for match in tech_pattern.findall(query):
+            if match.lower() not in [p.lower() for p in known_projects if p]:
+                tech_terms.append(match.lower())
+        
+        return QueryDecomposition(
+            intent=intent,
+            topic=entities["topic"],
+            project=entities["project"],
+            file_hint=entities["file_hint"],
+            time_hint=time_hint,
+            tech_terms=list(set(tech_terms)),
+            is_temporal_only=(time_hint is not None and not entities["topic"] and intent in ["temporal_lookup", "vague_memory"])
+        )
     
 
 
 
     def _ml_decompose(self, query: str) -> Optional[QueryDecomposition]:
-        """Attempt fast ML-powered decomposition (GLiNER + DeBERTa)."""
+        """Fast ML-powered decomposition using GLiNER + spaCy + rule-based intent."""
         try:
-            # 1. Load models (cached globally after first run)
+            # 1. Load GLiNER and spaCy (entity extraction)
             gliner = get_gliner()
-            classifier = get_intent_classifier()
             nlp = get_spacy_nlp()
             
-            # 2. spaCy Temporal Fallback
+            # 2. spaCy Temporal Extraction
             doc = nlp(query.lower())
             time_hint = None
             for ent in doc.ents:
@@ -172,9 +311,14 @@ class QueryDecomposer:
                     time_hint = TIME_HINT_MAP.get(ent.text, ent.text.replace(' ', '_'))
                     break
             
-            # 3. GLiNER Span Extraction
-            labels = ["project_name", "topic", "time_hint", "error_code", "library"]
-            entities = gliner.predict_entities(query, labels)
+            # 3. GLiNER Span Extraction - natural language labels for zero-shot
+            GLINER_LABELS = [
+                "software project name like BharatLawAI or SmartFork",
+                "programming library or technology like JWT or ChromaDB",
+                "source code file name with extension like auth.py",
+                "software error or bug name like CORS or NullPointer",
+            ]
+            entities = gliner.predict_entities(query, GLINER_LABELS)
             
             project_name = None
             topic = None
@@ -184,29 +328,19 @@ class QueryDecomposer:
             for ent in entities:
                 label = ent["label"]
                 text = ent["text"].strip()
-                if label == "project_name" and not project_name:
+                # Map GLiNER labels to our fields
+                if label == "software project name" and not project_name:
                     project_name = text
-                elif label == "topic" and not topic:
+                elif label == "programming technology or library" and not topic:
                     topic = text
-                elif label == "error_code" and not error_code:
+                elif label == "source code file name":
+                    if not file_hint:
+                        file_hint = text
+                elif label == "error or bug name" and not error_code:
                     error_code = text
-                elif label == "library":
-                    tech_terms.append(text)
-                elif label == "time_hint" and not time_hint:
-                    time_hint_clean = text.lower().replace(' ', '_')
-                    time_hint = TIME_HINT_MAP.get(text.lower(), time_hint_clean)
             
-            # 4. DeBERTa Sequence Classification (Intent)
-            candidate_labels = [
-                "decision_hunting", "implementation_lookup", 
-                "error_recall", "pattern_hunting", "temporal_lookup"
-            ]
-            
-            if not topic and not project_name and not error_code and len(query.split()) < 3:
-                intent_type = "temporal_lookup" if time_hint else "vague_memory"
-            else:
-                result = classifier(query, candidate_labels)
-                intent_type = result["labels"][0]
+            # 4. Rule-based Intent Classification (fast, no ML)
+            intent_type = self._rule_based_intent(query)
             
             # 5. Rapidfuzz Project Resolution
             if project_name and self.known_projects:

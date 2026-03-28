@@ -36,6 +36,7 @@ TOOL_CALL_TAGS = [
     "<replace_in_file>", "<insert_code_block>",
     "<browser_action>", "<use_mcp_tool>",
     "<access_mcp_resource>", "<switch_mode>",
+    "<update_todo_list>",  # Kilo Code's task tracking - NOT reasoning
 ]
 
 
@@ -292,7 +293,8 @@ class SessionParser:
                 else:
                     # This is a reasoning turn — strip noise, keep the reasoning
                     clean_reasoning = self._clean_reasoning_text(content)
-                    if clean_reasoning and len(clean_reasoning) > 20:
+                    if (clean_reasoning and len(clean_reasoning) > 20
+                            and self._is_reasoning_text(clean_reasoning)):
                         reasoning_turns.append(clean_reasoning)
         
         return ConversationDataV2(
@@ -326,7 +328,7 @@ class SessionParser:
         for msg in data:
             if msg.get('say') == 'reasoning':
                 text = msg.get('text', '').strip()
-                if text and len(text) > 20:
+                if text and len(text) > 20 and self._is_reasoning_text(text):
                     reasoning_blocks.append(text)
         
         return reasoning_blocks
@@ -409,6 +411,83 @@ class SessionParser:
         except Exception as e:
             return False
 
+    def _is_pure_file_path(self, line: str) -> bool:
+        """Check if a line is a pure file path with no context.
+        
+        These have zero retrieval value - just paths like backend/api/auth.py
+        """
+        stripped = line.strip()
+        # Match any path - has / and . and no spaces (like a file path)
+        return bool(re.match(r'^[\w\-\./]+$', stripped) and '/' in stripped and '.' in stripped and ' ' not in stripped)
+    
+    def _is_code_heavy(self, text: str) -> bool:
+        """Check if text is mostly code (high density of braces, colons, arrows)."""
+        if not text:
+            return False
+        # Count code-like characters
+        code_chars = sum(1 for c in text if c in '{}();:=><')
+        # If more than 15% code characters, it's code-heavy
+        return code_chars / len(text) > 0.15
+    
+    def _is_reasoning_text(self, text: str) -> bool:
+        """Return True if text is genuinely AI reasoning, not raw code.
+        
+        Rejects blocks that:
+        - Start with a markdown code fence
+        - Have >40% lines matching common code patterns (JSX, TS, indented stmts)
+        - Have >20% code character density (braces, semicolons, arrows, slashes)
+        
+        Called at two filtering points:
+        1. _parse_ui_messages() — before appending a say:'reasoning' block
+        2. _parse_api_conversation() — after _clean_reasoning_text() cleans output
+        """
+        stripped = text.strip()
+        if not stripped:
+            return False
+        
+        # Reject blocks that are entirely a code fence
+        if stripped.startswith('```'):
+            return False
+        
+        lines = stripped.splitlines()
+        if not lines:
+            return False
+        
+        # Count lines that look like code statements
+        code_line_patterns = [
+            r'^\s{2,}[\w<]',           # indented code (≥2 spaces + word/tag)
+            r'^\s*<[A-Z][a-zA-Z]+',    # JSX component opening tag
+            r'^\s*(?:const|let|var|function|class|import|export|return|if|else|elif|for|while|try|catch|finally|async|await)\b',
+            r'^\s*(?:interface|type|enum|namespace|declare|abstract)\b',  # TypeScript top-level
+            r'^\s*[a-zA-Z_][\w]*\s*[=:]\s*[\w\'"<({\[]',  # assignment / object literal
+        ]
+        code_line_count = 0
+        for line in lines:
+            for pat in code_line_patterns:
+                if re.match(pat, line):
+                    code_line_count += 1
+                    break
+        
+        code_line_ratio = code_line_count / len(lines)
+        if code_line_ratio > 0.40:  # >40% code-looking lines → treat as code block
+            return False
+        
+        # Dense code character check (slightly more permissive than _is_code_heavy)
+        code_chars = sum(1 for c in text if c in '{}();:=></')
+        if code_chars / len(text) > 0.20:  # >20% code chars → reject
+            return False
+        
+        return True
+    
+    def _handle_code_block(self, match):
+        """Trim long code blocks but keep short ones as they're likely examples."""
+        block = match.group(0)
+        lines = block.split('\n')
+        if len(lines) <= 15:
+            return block  # Short = likely example, keep it
+        # Long block — keep first 10 lines as context indicator
+        return '\n'.join(lines[:10]) + f'\n... [{len(lines)-10} lines of code]'
+
     def _clean_reasoning_text(self, content: str) -> str:
         """Clean assistant reasoning text by removing noise."""
         text = content
@@ -442,10 +521,11 @@ class SessionParser:
             r'(?:pip\s+(?:error|WARNING).*\n?){2,}',
             '[terminal output removed]', text
         )
-        text = re.sub(
-            r'Traceback \(most recent call last\):.*?(?=\n\n|\Z)',
-            '[traceback removed]', text, flags=re.DOTALL
-        )
+        # KEEP tracebacks - they're high-value signal for error_recall queries
+        # text = re.sub(
+        #     r'Traceback \(most recent call last\):.*?(?=\n\n|\Z)',
+        #     '[traceback removed]', text, flags=re.DOTALL
+        # )
         
         # ── CODE BLOCK CLEANUP WITH AST PROTECTION ──
         def _protect_code_blocks(match):
@@ -457,7 +537,12 @@ class SessionParser:
             code_only = re.sub(r'^```[\w]*\n|```$', '', block, flags=re.MULTILINE)
             
             if self._is_valid_code_ast(code_only, lang):
-                return block  # Protect real AST structures
+                # Valid AST code — truncate long blocks to a context-bearing
+                # header rather than keeping the entire code dump.
+                lines = block.split('\n')
+                if len(lines) > 15:
+                    return '\n'.join(lines[:8]) + f'\n... [{len(lines) - 8} lines of code]\n```'
+                return block  # Short AST snippet — likely an inline example, keep
             return '[code block removed]'
             
         text = re.sub(
@@ -477,6 +562,60 @@ class SessionParser:
             _cap_file_list, text
         )
         
+        # ── CHECKLIST ITEM FILTERING ──
+        # Remove todo checklist lines - these are task tracking, not reasoning
+        # Pattern: [x] task, [ ] task, [-] task
+        lines = text.split('\n')
+        filtered_lines = []
+        consecutive_checklist = 0
+        
+        for line in lines:
+            stripped = line.strip()
+            # Detect checklist patterns
+            if re.match(r'^\[[\sx]\]\s+', stripped) or re.match(r'^\[-\]\s+', stripped):
+                consecutive_checklist += 1
+                # Keep first checklist item as context, drop the rest
+                if consecutive_checklist <= 1:
+                    filtered_lines.append(line)
+            else:
+                consecutive_checklist = 0
+                filtered_lines.append(line)
+        
+        text = '\n'.join(filtered_lines)
+
+        # ── CHECKLIST ITEM FILTERING ──
+        # Remove todo checklist lines - these are task tracking, not reasoning
+        lines = text.split('\n')
+        filtered_lines = []
+        consecutive_checklist = 0
+        
+        for line in lines:
+            stripped = line.strip()
+            # Detect checklist patterns: [x] task, [ ] task, [-] task
+            if re.match(r'^\[[\sx]\]\s+', stripped) or re.match(r'^\[-\]\s+', stripped):
+                consecutive_checklist += 1
+                # Keep first checklist item as context, drop the rest
+                if consecutive_checklist <= 1:
+                    filtered_lines.append(line)
+            else:
+                consecutive_checklist = 0
+                filtered_lines.append(line)
+        
+        text = '\n'.join(filtered_lines)
+        
+        # ── FILE PATH FILTERING ──
+        # Drop pure file path lines - zero retrieval value
+        lines = text.split('\n')
+        text = '\n'.join(line for line in lines if not self._is_pure_file_path(line))
+        
+        # ── SUMMARY LABEL CLEANUP ──
+        # Strip "Previous Conversation:" label but keep content
+        text = re.sub(r'^\d+\.\s*Previous Conversation:\s*', '', text, flags=re.MULTILINE)
+        
+        # ── CODE BLOCK TRIMMING ──
+        # Trim long code blocks, keep short ones
+        text = re.sub(r'```[\w]*\n(?:[^\n]*\n)+?```', self._handle_code_block, text)
+
         # ── FINAL CLEANUP ──
         # Clean up excessive whitespace
         text = re.sub(r'\n{3,}', '\n\n', text)

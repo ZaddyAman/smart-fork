@@ -2038,9 +2038,9 @@ def summarize_v2(
             if summary_text:
                 try:
                     embedding = embedder.embed(summary_text, "summary_doc")
-                    # Use the vector_index's summary collection directly
+                    doc_id = f"{doc.session_id}_summary_0"
                     vector_index.summary_collection.upsert(
-                        ids=[f"{doc.session_id}_summary_0"],
+                        ids=[doc_id],
                         embeddings=[embedding],
                         documents=[summary_text],
                         metadatas=[{
@@ -2113,7 +2113,7 @@ def search_v2(
     decomposer = QueryDecomposer(llm=llm, known_projects=known_projects)
     decomposition = decomposer.decompose(query)
 
-    decomp_method = "LLM" if llm else "rule-based"
+    decomp_method = "rule-based"  # Always rule-based now
     console.print(f"[bold {info_color}]Query:[/bold {info_color}] {query}")
     console.print(f"[{theme['text_muted']}]Intent: {decomposition.intent} | "
                   f"Topic: {decomposition.topic or 'N/A'} | "
@@ -2234,7 +2234,7 @@ def search_v2(
 def fork_v2(
     session_id: str = typer.Argument(..., help="Session ID to fork context from"),
     intent: str = typer.Option("continue", "--intent", "-i",
-                                "Fork intent: continue, reference, or debug"),
+                                help="Fork intent: continue, reference, or debug"),
     query: str = typer.Option("", "--query", "-q", help="Optional query to filter context using Vector Search"),
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file path"),
     clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Copy to clipboard"),
