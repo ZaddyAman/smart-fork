@@ -13,7 +13,7 @@ Format:
 
 import time
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 from rich.console import Console
 from rich.panel import Panel
@@ -85,7 +85,7 @@ def build_result_card(doc: SessionDocument, match_score: float,
     )
 
 
-def render_result_cards(cards: List[ResultCard], console: Console = None) -> None:
+def render_result_cards(cards: List[ResultCard], console: Optional[Console] = None) -> None:
     """Render result cards to the terminal using Rich.
     
     Args:
@@ -147,7 +147,18 @@ def _render_single_card(card: ResultCard, index: int, console: Console) -> None:
     if card.files_changed:
         line4.append(" | Files: ", style="bold dim")
         line4.append(", ".join(card.files_changed), style="dim cyan")
-    
+
+    # Line 5: Supersession status (if any) or Session ID + fork command
+    supersession_line = None
+    if "🔄" in card.why_matched:
+        supersession_line = Text()
+        supersession_line.append("🔄 ", style="bold green")
+        supersession_line.append("This session fixes earlier attempts", style="green")
+    elif "⚠️" in card.why_matched:
+        supersession_line = Text()
+        supersession_line.append("⚠️ ", style="bold yellow")
+        supersession_line.append("This session has been superseded", style="yellow")
+
     # Line 5: Session ID + fork command
     line5 = Text()
     sid_short = card.session_id[:16] if len(card.session_id) > 16 else card.session_id
@@ -165,6 +176,9 @@ def _render_single_card(card: ResultCard, index: int, console: Console) -> None:
     content.append_text(line3)
     content.append("\n")
     content.append_text(line4)
+    if supersession_line:
+        content.append("\n")
+        content.append_text(supersession_line)
     content.append("\n")
     content.append_text(line5)
     

@@ -306,12 +306,30 @@ class ForkAssembler:
     
     def _build_header(self, doc: SessionDocument, intent: ForkIntent) -> str:
         config = INTENT_LAYERS[intent]
-        return (
+        header = (
             f"# SmartFork Context — {intent.value.title()}\n"
             f"**Project:** {doc.project_name}\n"
             f"**Session:** {doc.session_id}\n"
             f"**Intent:** {config['description']}"
         )
+        
+        # Add supersession warning if this session has been superseded
+        if self.store:
+            try:
+                from ..search.supersession_annotator import get_latest_in_chain
+                superseding = self.store.get_superseding_sessions(doc.session_id)
+                if superseding:
+                    latest_id = get_latest_in_chain(doc.session_id, self.store)
+                    header += (
+                        f"\n\n> ## ⚠️ Note: This Session Was Superseded\n"
+                        f"> A later session corrected the approach taken here.\n"
+                        f"> Consider using: `smartfork fork-v2 {latest_id[:16]} --intent reference`\n"
+                        f">\n> Original context below:"
+                    )
+            except Exception:
+                pass  # Silently skip if supersession check fails
+        
+        return header
     
     def _build_layer_a(self, doc: SessionDocument) -> str:
         """Layer A: Task + project context."""

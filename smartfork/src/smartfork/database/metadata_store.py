@@ -12,7 +12,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from loguru import logger
 
 from .models import SessionDocument
@@ -112,6 +112,30 @@ class MetadataStore:
             self.conn.execute("ALTER TABLE sessions ADD COLUMN cluster_id TEXT")
         except sqlite3.OperationalError:
             pass
+        
+        # v2.1 supersession columns
+        try:
+            self.conn.execute("ALTER TABLE sessions ADD COLUMN resolution_status TEXT DEFAULT 'unknown'")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE sessions ADD COLUMN had_errors INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        
+        # v2.1 supersession junction table
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_supersessions (
+                session_id      TEXT NOT NULL,
+                superseded_id   TEXT NOT NULL,
+                confidence      REAL DEFAULT 0.0,
+                detected_at     INTEGER,
+                PRIMARY KEY (session_id, superseded_id),
+                FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
+                FOREIGN KEY(superseded_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+            )
+        """)
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_superseded ON session_supersessions(superseded_id)")
         self.conn.commit()
         
         logger.debug(f"MetadataStore initialized at {self.db_path}")
@@ -133,8 +157,9 @@ class MetadataStore:
                 edit_count, user_edit_count, final_files,
                 domains, languages, layers, session_pattern,
                 task_raw, summary_doc, reasoning_docs,
-                cluster_id, indexed_at, schema_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cluster_id, resolution_status, had_errors,
+                indexed_at, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             doc.session_id,
             doc.project_name,
@@ -157,6 +182,8 @@ class MetadataStore:
             doc.summary_doc,
             json.dumps(doc.reasoning_docs),
             doc.cluster_id,
+            doc.resolution_status,
+            doc.had_errors,
             doc.indexed_at or int(time.time() * 1000),
             doc.schema_version,
         ))
@@ -268,21 +295,6 @@ class MetadataStore:
         row = self.conn.execute("SELECT COUNT(*) as cnt FROM sessions").fetchone()
         return row['cnt'] if row else 0
     
-    def get_project_list(self) -> List[Dict[str, Any]]:
-        """Get list of unique projects with session counts.
-        
-        Returns:
-            List of dicts: [{"project_name": "X", "session_count": N}, ...]
-        """
-        rows = self.conn.execute("""
-            SELECT project_name, COUNT(*) as session_count
-            FROM sessions
-            GROUP BY project_name
-            ORDER BY session_count DESC
-        """).fetchall()
-        return [{"project_name": row['project_name'], "session_count": row['session_count']}
-                for row in rows]
-    
     def get_domain_breakdown(self) -> Dict[str, int]:
         """Get breakdown of domains across all sessions.
         
@@ -359,6 +371,54 @@ class MetadataStore:
             return row['full_raw_text']
         return None
     
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # SUPERSESSION METHODS (v2.1)
+    # ═══════════════════════════════════════════════════════════════════════════════
+    
+    def get_superseding_sessions(self, session_id: str) -> List[Tuple[str, float, int]]:
+        """Get sessions that supersede the given session.
+        
+        Args:
+            session_id: The session that may have been superseded
+        
+        Returns:
+            List of (session_id, confidence, detected_at) tuples, sorted by confidence DESC
+        """
+        rows = self.conn.execute("""
+            SELECT session_id, confidence, detected_at FROM session_supersessions
+            WHERE superseded_id = ? ORDER BY confidence DESC, detected_at DESC
+        """, (session_id,)).fetchall()
+        return [(row['session_id'], row['confidence'], row['detected_at']) for row in rows]
+    
+    def get_superseded_by(self, session_id: str) -> List[Tuple[str, float]]:
+        """Get sessions that are superseded by the given session.
+        
+        Args:
+            session_id: The session that may supersede others
+        
+        Returns:
+            List of (superseded_id, confidence) tuples, sorted by confidence DESC
+        """
+        rows = self.conn.execute("""
+            SELECT superseded_id, confidence FROM session_supersessions
+            WHERE session_id = ? ORDER BY confidence DESC
+        """, (session_id,)).fetchall()
+        return [(row['superseded_id'], row['confidence']) for row in rows]
+    
+    def insert_supersession_link(self, session_id: str, superseded_id: str, confidence: float) -> None:
+        """Insert or update a supersession relationship.
+        
+        Args:
+            session_id: The newer session that supersedes
+            superseded_id: The older session that is superseded
+            confidence: Cosine similarity score (0.0 - 1.0)
+        """
+        self.conn.execute("""
+            INSERT OR REPLACE INTO session_supersessions (session_id, superseded_id, confidence, detected_at)
+            VALUES (?, ?, ?, ?)
+        """, (session_id, superseded_id, confidence, int(time.time() * 1000)))
+        self.conn.commit()
+    
     def delete_session(self, session_id: str) -> None:
         """Delete a session from the store.
         
@@ -409,6 +469,8 @@ class MetadataStore:
             summary_doc=row['summary_doc'] or '',
             reasoning_docs=json.loads(row['reasoning_docs'] or '[]'),
             cluster_id=row['cluster_id'] if 'cluster_id' in row.keys() else None,
+            resolution_status=row['resolution_status'] if 'resolution_status' in row.keys() else 'unknown',
+            had_errors=row['had_errors'] if 'had_errors' in row.keys() else 0,
             indexed_at=row['indexed_at'] or 0,
             schema_version=row['schema_version'] or 2,
         )

@@ -235,6 +235,11 @@ class SessionDocument(BaseModel):
     
     # RAPTOR clustering (Phase 9)
     cluster_id: Optional[str] = None   # UUID for cross-session topic clustering
+    
+    # Supersession detection (v2.1)
+    resolution_status: str = "unknown"  # "solved", "partial", "ongoing", "unknown"
+    had_errors: int = 0                 # Count of error signals in task_raw
+    supersedes_ids: List[str] = []      # IDs of sessions this one corrects
 
 
 class QueryDecomposition(BaseModel):

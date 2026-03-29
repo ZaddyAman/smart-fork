@@ -137,18 +137,9 @@ def _render_bar(progress: float, width: int, bar_color: str, empty_color: str,
     text = Text()
     filled = int(progress * width)
     
-    # Filled portion with subtle wave animation
+    # Filled portion (solid color to prevent glitching)
     for i in range(filled):
-        # Subtle brightness wave on filled cells
-        t = frame / 10.0
-        brightness = math.sin(i / width * math.pi * 3 - t * 2.0) * 0.3 + 0.7
-        if brightness > 0.8:
-            style = f"bold {bar_color}"
-        elif brightness > 0.5:
-            style = bar_color
-        else:
-            style = f"dim {bar_color}"
-        text.append(BAR_FILLED, style=style)
+        text.append(BAR_FILLED, style=bar_color)
     
     # Head (animated pulse at the frontier)
     if filled < width and progress > 0:
