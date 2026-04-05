@@ -472,7 +472,7 @@ def _build_frame(stats: IndexingStats, frame: int, theme: dict) -> Panel:
         footer.append("  ● ", style=f"bold {theme['done_color']}")
         footer.append("All sessions indexed — ready to search", style=f"dim {muted}")
     elif stats.errors > 0:
-        footer.append(f"  ⚠ {stats.errors} error(s)  ", style="bold #F59E0B")
+        footer.append(f"  ⚠ {stats.errors} error(s)  ", style=f"bold {theme['semantic']['warning']}")
         if stats.current_session_name:
             footer.append(_trunc(stats.current_session_name, 40), style=f"dim {muted}")
     elif stats.current_session_name:
@@ -673,7 +673,7 @@ def display_discovery_phase(
         try:
             items = list(tasks_path.iterdir())
         except PermissionError as e:
-            console.print(f"[red]Cannot read tasks path: {e}[/red]")
+            console.print(f"[{theme['semantic']['error']}]Cannot read tasks path: {e}[/{theme['semantic']['error']}]")
             return [], 0, 0
 
         for item in items:
@@ -746,7 +746,7 @@ def display_completion_summary(
     if stats.errors > 0:
         grid.add_row(Text(""), Text(""), Text(""))
         et = Text(justify="center")
-        et.append(f"⚠ {stats.errors} session(s) failed", style="bold #F59E0B")
+        et.append(f"⚠ {stats.errors} session(s) failed", style=f"bold {theme['semantic']['warning']}")
         grid.add_row(et, Text(""), Text(""))
 
     console.print()

@@ -21,7 +21,7 @@ import sys
 import json
 import time
 
-from .config import get_config, CONFIG_FILE
+from .config import get_config, CONFIG_FILE, SmartForkConfig
 from .database.chroma_db import ChromaDatabase
 from .indexer.indexer import FullIndexer, IncrementalIndexer
 from .indexer.watcher import TranscriptWatcher
@@ -102,7 +102,7 @@ def main(
         theme = get_theme_colors(theme_name)
         semantic = theme.get("semantic", {})
         info_color = semantic.get("info", theme["text_primary"])
-        error_color = semantic.get("error", "#EF4444")
+        error_color = semantic.get("error", theme["text_primary"])
         
         console.print(Panel.fit(
             f"[bold {info_color}]SmartFork Interactive Mode[/bold {info_color}]\n"
@@ -118,281 +118,9 @@ def main(
             raise typer.Exit(1)
 
 
-@app.command()
-def index(
-    force: bool = typer.Option(False, "--force", "-f", help="Force full re-index"),
-    watch: bool = typer.Option(False, "--watch", "-w", help="Watch after indexing"),
-):
-    """Index all Kilo Code sessions."""
-    config     = get_config()
-    theme_name = getattr(config, "theme", DEFAULT_THEME)
-    theme      = THEMES.get(theme_name, THEMES[DEFAULT_THEME])
-
-    # Header panel
-    path_str = str(config.kilo_code_tasks_path)
-    if len(path_str) > 58:
-        path_str = "…" + path_str[-55:]
-    hdr = Text()
-    hdr.append("⚡ SmartFork ", style=f"bold {theme['bars'][0]['color']}")
-    hdr.append("Indexer\n",    style=f"bold {theme['text_primary']}")
-    hdr.append(f"  {path_str}", style=f"dim {theme['text_muted']}")
-    console.print(Panel(hdr, border_style=theme["panel_border"], box=box.ROUNDED, padding=(0, 2)))
-    console.print()
-
-    if not config.kilo_code_tasks_path.exists():
-        console.print(f"[red]Tasks path not found:[/red] {config.kilo_code_tasks_path}")
-        raise typer.Exit(1)
-
-    db = ChromaDatabase(config.chroma_db_path)
-    if force:
-        console.print(f"[{theme['text_muted']}]Resetting database...[/{theme['text_muted']}]")
-        db.reset()
-
-    db_session_ids = set()
-    try:
-        db_session_ids = set(db.get_unique_sessions())
-    except Exception:
-        pass
-
-    # Discovery
-    all_sessions, new_count, _ = display_discovery_phase(
-        tasks_path=config.kilo_code_tasks_path,
-        db_session_ids=db_session_ids,
-        console=console, theme_name=theme_name,
-    )
-
-    if not all_sessions:
-        console.print(f"[{theme['text_muted']}]No sessions found.[/{theme['text_muted']}]")
-        raise typer.Exit(0)
-
-    sessions_to_index = [s for s in all_sessions if s.name not in db_session_ids]
-
-    if not sessions_to_index:
-        console.print(f"[{theme['done_color']}]✓[/{theme['done_color']}] All sessions already indexed.\n")
-        if watch:
-            _start_watch_mode(config, db, console, theme)
-        raise typer.Exit(0)
-
-    console.print(
-        f"  [{theme['bars'][1]['color']}]→[/{theme['bars'][1]['color']}] "
-        f"Indexing {len(sessions_to_index)} sessions...\n"
-    )
-
-    indexer = FullIndexer(
-        db, 
-        chunk_size=config.chunk_size, 
-        chunk_overlap=config.chunk_overlap,
-        batch_size=config.batch_size
-    )
-    final_stats = None
-
-    with SmartForkProgress(
-        total_sessions=len(sessions_to_index),
-        theme_name=theme_name,
-        console=console,
-        animation_fps=config.get_effective_fps(),
-        disable_animation=config.disable_animations,
-    ) as prog:
-
-        for i, session_dir in enumerate(sessions_to_index):
-            sid = session_dir.name
-            prog.set_session(sid)
-
-            try:
-                prog.set_phase("Parsing", 0.3)
-                prog.set_phase("Embedding", 0.0)
-                chunks = indexer.index_session(session_dir)
-                prog.set_phase("Embedding", 1.0)
-
-                # Try to get LLM-generated title
-                title = ""
-                try:
-                    sc = db.get_session_chunks(sid)
-                    if sc:
-                        title = sc[0].metadata.session_title or ""
-                except Exception:
-                    pass
-                if title:
-                    prog.set_session(sid, title=title)
-
-                prog.add_chunks(chunks)
-                prog.advance()
-
-            except Exception as e:
-                logger.error(f"Failed to index {sid}: {e}")
-                prog.add_error()
-                prog.advance()
-
-            prog.set_bm25((i+1) / len(sessions_to_index))
-
-        prog.finish()
-        final_stats = prog._stats
-
-    # CRITICAL: Finalize to flush any remaining pending chunks to database
-    indexer.finalize()
-
-    # Completion
-    total_db = 0
-    try:
-        total_db = len(db.get_unique_sessions())
-    except Exception:
-        pass
-
-    if final_stats:
-        display_completion_summary(
-            stats=final_stats, total_db_sessions=total_db,
-            console=console, theme_name=theme_name,
-        )
-
-    help_manager.show_after_command(
-        UserAction.INDEX,
-        db_session_count=total_db,
-        processed=final_stats.indexed_sessions if final_stats else 0,
-        failed=final_stats.errors if final_stats else 0,
-    )
-
-    if watch:
-        _start_watch_mode(config, db, console, theme)
-
-
-def _start_watch_mode(config, db, console, theme):
-    """Helper to start watch mode after indexing."""
-    console.print(
-        f"\n  [{theme['bars'][0]['color']}]◉[/{theme['bars'][0]['color']}] "
-        f"Watch mode. Ctrl+C to stop.\n"
-    )
-    
-    # Use longer poll interval in lite mode
-    poll_interval = 10.0 if config.lite_mode else 5.0
-    if config.lite_mode:
-        console.print(f"  [dim]Lite mode: using {poll_interval}s poll interval[/dim]\n")
-    
-    incremental = IncrementalIndexer(db)
-    watcher = TranscriptWatcher(
-        config.kilo_code_tasks_path, 
-        incremental.on_session_changed,
-        poll_interval=poll_interval
-    )
-    watcher.start()
-    try:
-        while True:
-            # Longer sleep in lite mode to reduce CPU
-            sleep_interval = 2.0 if config.lite_mode else 1.0
-            time.sleep(sleep_interval)
-    except KeyboardInterrupt:
-        console.print(f"\n  [{theme['text_muted']}]Watcher stopped.[/{theme['text_muted']}]")
-        watcher.stop()
-
-
-@app.command()
-def search(
-    query: str = typer.Argument(..., help="Search query"),
-    n_results: int = typer.Option(5, "--results", "-n", help="Number of results"),
-    path: Optional[Path] = typer.Option(None, "--path", "-p", help="Current directory for path matching"),
-    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
-):
-    """Search indexed sessions using hybrid search (semantic + BM25 + recency + path)."""
-    config = get_config()
-    theme_name = getattr(config, "theme", DEFAULT_THEME)
-    theme = get_theme_colors(theme_name)
-    semantic = theme.get("semantic", {})
-    
-    # Theme-aware colors
-    info_color = semantic.get("info", theme["text_primary"])
-    success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
-    error_color = semantic.get("error", "#EF4444")
-    accent_color = semantic.get("accent", theme["text_primary"])
-    
-    db = ChromaDatabase(config.chroma_db_path)
-    engine = HybridSearchEngine(
-        db,
-        enable_cache=config.enable_search_cache,
-        cache_size=config.search_cache_size,
-        cache_ttl=config.search_cache_ttl
-    )
-    
-    if db.get_session_count() == 0:
-        console.print(f"[{warning_color}]No sessions indexed. Run 'smartfork index' first.[/{warning_color}]")
-        raise typer.Exit(1)
-    
-    console.print(f"[bold {info_color}]Searching for:[/bold {info_color}] {query}\n")
-    
-    # Use hybrid search with path matching
-    current_dir = str(path) if path else str(Path.cwd())
-    results = engine.search(query, current_dir=current_dir, n_results=n_results)
-    
-    if not results:
-        console.print(f"[{warning_color}]No results found.[/{warning_color}]")
-        return
-    
-    if json_output:
-        output = [r.to_dict() for r in results]
-        console.print(json.dumps(output, indent=2, default=str))
-    else:
-        # Display results with breakdown
-        console.print(f"[{theme['text_muted']}]Found {len(results)} results (using hybrid search)[/{theme['text_muted']}]\n")
-        
-        for i, r in enumerate(results, 1):
-            score_pct = f"{r.score:.1%}"
-            breakdown = r.breakdown
-            
-            # Build breakdown string
-            breakdown_str = " | ".join([
-                f"sem:{breakdown.get('semantic', 0):.2f}",
-                f"bm25:{breakdown.get('bm25', 0):.2f}",
-                f"rec:{breakdown.get('recency', 0):.2f}",
-                f"path:{breakdown.get('path', 0):.2f}"
-            ])
-            
-            # Get files in context
-            files = r.metadata.get("files_in_context", [])
-            files_str = "\n".join([f"  [{theme['text_muted']}]* {f}[/{theme['text_muted']}]" for f in files[:3]]) if files else ""
-            
-            # Get last active
-            last_active = r.metadata.get("last_active", "Unknown")
-            if last_active and last_active != "Unknown":
-                try:
-                    dt = datetime.fromisoformat(last_active)
-                    last_active = dt.strftime("%Y-%m-%d")
-                except:
-                    pass
-            
-            # Theme-aware border colors based on score
-            if r.score > 0.7:
-                border = success_color
-            elif r.score > 0.4:
-                border = warning_color
-            else:
-                border = error_color
-            
-            panel_content = f"[bold {info_color}]Score:[/bold {info_color}] {score_pct}\n"
-            panel_content += f"[{theme['text_muted']}]{breakdown_str}[/{theme['text_muted']}]\n"
-            panel_content += f"[{theme['text_muted']}]Last active: {last_active}[/{theme['text_muted']}]\n"
-            if files_str:
-                panel_content += f"\n[bold {info_color}]Files:[/bold {info_color}]\n{files_str}"
-            
-            # Get session title if available
-            session_title = r.metadata.get("session_title")
-            if session_title:
-                title_text = f"[{i}] {session_title}"
-            else:
-                title_text = f"[{i}] Session {r.session_id[:16]}..."
-            
-            console.print(Panel(
-                panel_content,
-                title=title_text,
-                border_style=border
-            ))
-        
-        # Show contextual help
-        help_manager.show_after_command(
-            UserAction.SEARCH,
-            db_session_count=db.get_session_count(),
-            query=query,
-            result_count=len(results)
-        )
-
+# ─────────────────────────────────────────────────────────────────────────────
+# SEARCH COMMAND
+# ─────────────────────────────────────────────────────────────────────────────
 
 @app.command()
 def detect_fork(
@@ -411,8 +139,8 @@ def detect_fork(
     # Theme-aware colors
     info_color = semantic.get("info", theme["text_primary"])
     success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
-    error_color = semantic.get("error", "#EF4444")
+    warning_color = semantic.get("warning", theme["text_primary"])
+    error_color = semantic.get("error", theme["text_primary"])
     accent_color = semantic.get("accent", theme["text_primary"])
     
     db = ChromaDatabase(config.chroma_db_path)
@@ -524,289 +252,6 @@ def detect_fork(
         )
 
 
-@app.command()
-def fork(
-    session_id: str = typer.Argument(..., help="Session ID to fork context from"),
-    query: str = typer.Option("", "--query", "-q", help="Original search query for context"),
-    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file path"),
-    path: Optional[Path] = typer.Option(None, "--path", "-p", help="Current working directory"),
-    smart: bool = typer.Option(False, "--smart", help="Use query-aware smart fork generation"),
-    max_tokens: int = typer.Option(2000, "--max-tokens", "-t", help="Maximum tokens in output (smart mode only)"),
-    obsidian: bool = typer.Option(False, "--obsidian", help="Also save to Obsidian vault"),
-    vault_path: Optional[Path] = typer.Option(None, "--vault-path", "-v", help="Obsidian vault path (used with --obsidian)"),
-):
-    """Generate a fork.md context file from a session."""
-    config = get_config()
-    theme_name = getattr(config, "theme", DEFAULT_THEME)
-    theme = get_theme_colors(theme_name)
-    semantic = theme.get("semantic", {})
-
-    # Theme-aware colors
-    info_color = semantic.get("info", theme["text_primary"])
-    success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
-    error_color = semantic.get("error", "#EF4444")
-    accent_color = semantic.get("accent", theme["text_primary"])
-
-    db = ChromaDatabase(config.chroma_db_path)
-
-    if db.get_session_count() == 0:
-        console.print(f"[{warning_color}]No sessions indexed. Run 'smartfork index' first.[/{warning_color}]")
-        raise typer.Exit(1)
-
-    # Check if session exists
-    chunks = db.get_session_chunks(session_id)
-    if not chunks:
-        console.print(f"[{error_color}]Session not found: {session_id}[/{error_color}]")
-        raise typer.Exit(1)
-
-    # Get session title if available
-    session_title = chunks[0].metadata.session_title if chunks else None
-    if session_title:
-        console.print(f"[bold {info_color}]Generating fork.md for session:[/bold {info_color}] {session_title}")
-        console.print(f"[{theme['text_muted']}]ID: {session_id[:20]}...[/{theme['text_muted']}]")
-    else:
-        console.print(f"[bold {info_color}]Generating fork.md for session:[/bold {info_color}] {session_id[:20]}...")
-
-    # Use smart generator if --smart flag is set
-    current_dir = str(path) if path else str(Path.cwd())
-
-    if smart:
-        if not query:
-            console.print(f"[{error_color}]Error: --query is required when using --smart mode[/{error_color}]")
-            console.print(f"[{theme['text_muted']}]Usage: smartfork fork <session_id> --smart --query <query>[/{theme['text_muted']}]")
-            raise typer.Exit(1)
-
-        generator = SmartForkMDGenerator(db)
-        content = generator.generate(
-            session_id=session_id,
-            query=query,
-            current_dir=current_dir,
-            max_tokens=max_tokens
-        )
-        console.print(f"[{theme['text_muted']}]Using smart query-aware generation[/{theme['text_muted']}]")
-    else:
-        generator = ForkMDGenerator(db)
-        content = generator.generate(session_id, query or "forked session", current_dir)
-
-    # Save to file
-    if not output:
-        short_id = session_id[:8]
-        output = Path(f"fork_{short_id}.md")
-
-    output.write_text(content, encoding="utf-8")
-
-    console.print(f"[{success_color}]OK Fork.md saved to:[/{success_color}] {output.absolute()}")
-    console.print(f"\n[{theme['text_muted']}]Preview:[/{theme['text_muted']}]\n{content[:500]}...")
-
-    # Optionally save to Obsidian vault
-    if obsidian:
-        from .database.metadata_store import MetadataStore
-        vault = Path(vault_path) if vault_path else Path("./obsidian-vault")
-        forks_dir = vault / "Forks"
-        forks_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Get session info from metadata store
-        store = MetadataStore(config.sqlite_db_path)
-        row = store.conn.execute(
-            "SELECT project_name, summary_doc FROM sessions WHERE session_id = ?", (session_id,)
-        ).fetchone()
-        store.close()
-        
-        project = row['project_name'] if row else 'Unknown'
-        summary = row['summary_doc'] if row and row['summary_doc'] else ''
-        
-        # Create Obsidian-compatible fork note
-        fork_note = f"""---
-tags:
-  - fork
-  - {project.lower().replace(' ', '-')}
-  - session/{session_id[:16]}
-aliases:
-  - "Fork {session_id[:12]}..."
-created: "{{{{timestamp}}}}"
-query: "{query}"
-source_session: "{session_id}"
-project: "{project}"
----
-
-# Fork: {session_id[:16]}
-
-> Generated from session [[{session_id[:16]}]]
-
-**Query:** {query or 'N/A'}
-**Source Session:** [[{session_id[:16]}]]
-
-## Context
-
-{fork_md_to_obsidian(content)}
-
----
-
-*Generated by SmartFork at {{{{date}}}}*
-"""
-        
-        # Save fork note
-        fork_file = forks_dir / f"fork_{session_id[:16]}.md"
-        fork_file.write_text(fork_note, encoding="utf-8")
-        console.print(f"[{success_color}]OK Fork saved to Obsidian vault:[/{success_color}] {fork_file}")
-
-    # Show contextual help
-    help_manager.show_after_command(
-        UserAction.FORK,
-        db_session_count=db.get_session_count(),
-        session_id=session_id,
-        output_file=str(output)
-    )
-
-
-@app.command()
-def resume(
-    session: str = typer.Option(..., "--session", "-s", help="Session ID to resume from"),
-    query: str = typer.Option(..., "--query", "-q", help="Query describing what you want to retrieve"),
-    max_tokens: int = typer.Option(2000, "--max-tokens", "-t", help="Maximum tokens in output"),
-    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file path (optional)"),
-    path: Optional[Path] = typer.Option(None, "--path", "-p", help="Current working directory"),
-):
-    """Generate a smart context fork from a previous session for resuming work."""
-    config = get_config()
-    theme_name = getattr(config, "theme", DEFAULT_THEME)
-    theme = get_theme_colors(theme_name)
-    semantic = theme.get("semantic", {})
-
-    # Theme-aware colors
-    info_color = semantic.get("info", theme["text_primary"])
-    success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
-    error_color = semantic.get("error", "#EF4444")
-    accent_color = semantic.get("accent", theme["text_primary"])
-
-    db = ChromaDatabase(config.chroma_db_path)
-
-    if db.get_session_count() == 0:
-        console.print(f"[{warning_color}]No sessions indexed. Run 'smartfork index' first.[/{warning_color}]")
-        raise typer.Exit(1)
-
-    # Check if session exists
-    chunks = db.get_session_chunks(session)
-    if not chunks:
-        console.print(f"[{error_color}]Session not found: {session}[/{error_color}]")
-        raise typer.Exit(1)
-
-    # Get session title if available
-    session_title = chunks[0].metadata.session_title if chunks else None
-
-    console.print(Panel.fit(
-        f"[bold {info_color}]Generating smart context fork[/bold {info_color}]\n"
-        f"Query: {query}",
-        title=f"Resume: {session_title or session[:20]}",
-        border_style=theme["panel_border"]
-    ))
-
-    # Use SmartForkMDGenerator for query-aware context extraction
-    generator = SmartForkMDGenerator(db)
-    current_dir = str(path) if path else str(Path.cwd())
-
-    with console.status(f"[bold {info_color}]Extracting relevant context..."):
-        content = generator.generate(
-            session_id=session,
-            query=query,
-            current_dir=current_dir,
-            max_tokens=max_tokens
-        )
-
-    # Calculate token savings info
-    total_chunks = len(chunks)
-    relevant_chunks = content.count("### Exchange")  # Count exchange sections
-
-    # Save or display output
-    if output:
-        output_path = generator.save(
-            session_id=session,
-            query=query,
-            output_path=output,
-            current_dir=current_dir,
-            max_tokens=max_tokens
-        )
-        console.print(f"[{success_color}]OK Smart context fork saved to:[/{success_color}] {output_path.absolute()}")
-    else:
-        # Generate default filename
-        short_id = session[:8]
-        output_path = Path(f"fork_{short_id}.md")
-        output_path.write_text(content, encoding="utf-8")
-        console.print(f"[{success_color}]OK Smart context fork saved to:[/{success_color}] {output_path.absolute()}")
-
-    # Show token efficiency info
-    console.print(f"\n[bold {info_color}]Context Summary:[/bold {info_color}]")
-    console.print(f"  [{theme['text_muted']}]Total chunks in session:[/{theme['text_muted']}] {total_chunks}")
-    console.print(f"  [{success_color}]Relevant chunks retrieved:[/{success_color}] ~{relevant_chunks}")
-    console.print(f"  [{theme['text_muted']}]Token budget:[/{theme['text_muted']}] {max_tokens}")
-
-    console.print(f"\n[{theme['text_muted']}]Preview:[/{theme['text_muted']}]")
-    console.print(Panel(
-        content[:800] + "..." if len(content) > 800 else content,
-        border_style=theme["panel_border"]
-    ))
-
-
-@app.command()
-def status():
-    """Show indexing status."""
-    config = get_config()
-    theme_name = getattr(config, "theme", DEFAULT_THEME)
-    theme = get_theme_colors(theme_name)
-    semantic = theme.get("semantic", {})
-    
-    db = ChromaDatabase(config.chroma_db_path)
-    
-    # Get stats
-    total_chunks = db.get_session_count()
-    unique_sessions = len(db.get_unique_sessions())
-    
-    # Check tasks directory
-    if config.kilo_code_tasks_path.exists():
-        task_dirs = [d for d in config.kilo_code_tasks_path.iterdir() if d.is_dir()]
-        total_tasks = len(task_dirs)
-    else:
-        total_tasks = 0
-    
-    # Theme-aware colors
-    info_color = semantic.get("info", theme["text_primary"])
-    success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
-    
-    # Display status
-    console.print(Panel.fit(
-        f"[bold {theme['text_primary']}]SmartFork Status[/bold {theme['text_primary']}]",
-        title="Status",
-        border_style=theme["panel_border"]
-    ))
-    
-    table = Table(show_header=False)
-    table.add_column("Property", style=info_color)
-    table.add_column("Value", style=success_color)
-    
-    table.add_row("Kilo Code Tasks Path", str(config.kilo_code_tasks_path))
-    table.add_row("Database Path", str(config.chroma_db_path))
-    table.add_row("Total Task Directories", str(total_tasks))
-    table.add_row("Indexed Sessions", str(unique_sessions))
-    table.add_row("Total Chunks", str(total_chunks))
-    table.add_row("Index Coverage", f"{unique_sessions}/{total_tasks} ({unique_sessions/max(1,total_tasks)*100:.1f}%)")
-    
-    console.print(table)
-    
-    if unique_sessions < total_tasks:
-        console.print(f"\n[{warning_color}]Tip: Run 'smartfork index' to index remaining sessions[/{warning_color}]")
-    
-    # Show contextual help
-    help_manager.show_after_command(
-        UserAction.STATUS,
-        db_session_count=unique_sessions,
-        total_tasks=total_tasks,
-        indexed_sessions=unique_sessions
-    )
-
-
 @app.command("session-list")
 def session_list(
     limit: int = typer.Option(20, "--limit", "-n", help="Maximum number of sessions to show"),
@@ -818,186 +263,234 @@ def session_list(
     theme = get_theme_colors(theme_name)
     semantic = theme.get("semantic", {})
     
-    # Theme-aware colors
     info_color = semantic.get("info", theme["text_primary"])
     success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
+    warning_color = semantic.get("warning", theme["text_primary"])
     accent_color = semantic.get("accent", theme["text_primary"])
     
-    db = ChromaDatabase(config.chroma_db_path)
+    from .database.metadata_store import MetadataStore
     
-    if db.get_session_count() == 0:
+    store = MetadataStore(config.sqlite_db_path)
+    session_count = store.get_session_count()
+    
+    if session_count == 0:
         console.print(f"[{warning_color}]No sessions indexed. Run 'smartfork index' first.[/{warning_color}]")
+        store.close()
         raise typer.Exit(1)
     
-    # Get all unique sessions
-    session_ids = db.get_unique_sessions()
+    all_sessions = store.get_all_sessions()
+    store.close()
     
-    if not session_ids:
-        console.print(f"[{warning_color}]No sessions found in database.[/{warning_color}]")
-        raise typer.Exit(0)
-    
-    # Gather session info with titles
     sessions_info = []
-    for session_id in session_ids:
-        try:
-            chunks = db.get_session_chunks(session_id)
-            if chunks:
-                # Get title from first chunk's metadata
-                title = chunks[0].metadata.session_title or "Untitled"
-                # Get last active timestamp
-                last_active = chunks[0].metadata.last_active or "Unknown"
-                # Count chunks for this session
-                chunk_count = len(chunks)
-                sessions_info.append({
-                    "id": session_id,
-                    "title": title,
-                    "last_active": last_active,
-                    "chunks": chunk_count
-                })
-        except Exception as e:
-            logger.warning(f"Failed to get info for session {session_id}: {e}")
-            sessions_info.append({
-                "id": session_id,
-                "title": "Error loading",
-                "last_active": "Unknown",
-                "chunks": 0
-            })
+    for doc in all_sessions:
+        sessions_info.append({
+            "id": doc.session_id,
+            "title": doc.task_raw[:60] + "..." if doc.task_raw and len(doc.task_raw) > 60 else (doc.task_raw or "Untitled"),
+            "project": doc.project_name or "Unknown",
+            "started": doc.session_start,
+        })
     
-    # Sort by last active (most recent first)
-    sessions_info.sort(key=lambda x: x["last_active"] if x["last_active"] != "Unknown" else "", reverse=True)
+    sessions_info.sort(key=lambda x: x["started"] if x["started"] else "", reverse=True)
     
     if json_output:
-        output = {
-            "total": len(sessions_info),
-            "sessions": sessions_info[:limit]
-        }
+        output = {"total": len(sessions_info), "sessions": sessions_info[:limit]}
         console.print(json.dumps(output, indent=2, default=str))
         return
     
-    # Display header
     console.print(Panel.fit(
         f"[bold {info_color}]{len(sessions_info)} indexed sessions[/bold {info_color}]",
         title="Session List",
         border_style=theme["panel_border"]
     ))
     
-    # Create table
     table = Table(show_header=True)
     table.add_column("#", style=accent_color, justify="right", width=4)
     table.add_column("Session ID", style=info_color, width=12)
     table.add_column("Title", style=success_color, min_width=30)
-    table.add_column("Last Active", style=theme["text_muted"], width=12)
-    table.add_column("Chunks", style=accent_color, justify="right", width=8)
+    table.add_column("Project", style=theme["text_muted"], width=15)
+    table.add_column("Started", style=theme["text_muted"], width=12)
     
     for i, session in enumerate(sessions_info[:limit], 1):
-        # Format short ID (first 8 chars)
         short_id = session["id"][:8]
-        full_id = session["id"]
-        
-        # Create clickable text using Rich hyperlink
-        # Clicking copies the full ID (supported in modern terminals)
-        clickable_id = f"[link=copy:{full_id}]{short_id}[/link]"
-        
-        # Format last active
-        last_active = session["last_active"]
-        if last_active and last_active != "Unknown":
+        started = session["started"]
+        if started:
             try:
-                dt = datetime.fromisoformat(last_active)
-                last_active = dt.strftime("%Y-%m-%d")
+                from datetime import datetime
+                dt = datetime.fromtimestamp(started / 1000)
+                started = dt.strftime("%Y-%m-%d")
             except:
                 pass
         
         table.add_row(
             str(i),
-            clickable_id,
+            short_id,
             session["title"],
-            last_active,
-            str(session["chunks"])
+            session["project"],
+            started or "N/A"
         )
     
     console.print(table)
     
     if len(sessions_info) > limit:
         console.print(f"\n[{theme['text_muted']}]... and {len(sessions_info) - limit} more sessions (use --limit to show more)[/{theme['text_muted']}]")
-    
-    console.print(f"\n[{theme['text_muted']}]Tip: Click the Session ID to copy full ID, or use 'smartfork fork <number>'[/{theme['text_muted']}]")
 
 
-@app.command()
-def config_show():
-    """Show current configuration."""
+# ──────────────────────────────────────────────────────────────────────────────
+# CONFIG COMMAND — Unified config management
+# ──────────────────────────────────────────────────────────────────────────────
+
+config_app = typer.Typer(help="Manage SmartFork configuration.")
+app.add_typer(config_app, name="config")
+
+
+@config_app.callback(invoke_without_command=True)
+def config_main(ctx: typer.Context):
+    """Show all configuration settings grouped by category."""
+    if ctx.invoked_subcommand is not None:
+        return
+
     config = get_config()
     theme_name = getattr(config, "theme", DEFAULT_THEME)
     theme = get_theme_colors(theme_name)
     semantic = theme.get("semantic", {})
-    
     info_color = semantic.get("info", theme["text_primary"])
     success_color = semantic.get("success", theme["done_color"])
+    muted = theme["text_muted"]
 
-    console.print(Panel.fit(
-        f"[bold {theme['text_primary']}]SmartFork Configuration[/bold {theme['text_primary']}]",
-        title="Config",
-        border_style=theme["panel_border"]
+    sections = {
+        "Embedding": ["embedding_provider", "embedding_model", "embedding_dimensions"],
+        "LLM": ["llm_provider", "llm_model"],
+        "UI": ["theme", "animation_fps", "disable_animations", "lite_mode", "adaptive_fps"],
+        "Indexing": ["chunk_size", "chunk_overlap"],
+        "Search": ["default_search_results", "enable_search_cache", "search_cache_size", "search_cache_ttl"],
+        "Performance": ["batch_size"],
+        "Logging": ["log_level", "log_file"],
+        "Schema": ["schema_version"],
+    }
+
+    content = Text()
+    for section, keys in sections.items():
+        content.append(f"  {section}\n", style=f"bold {info_color}")
+        for key in keys:
+            value = getattr(config, key, None)
+            default = getattr(SmartForkConfig(), key, None)
+            marker = "" if value == default else " [changed]"
+            content.append(f"    {key:<25} ", style=f"dim {muted}")
+            content.append(f"{value}", style=success_color)
+            content.append(f"{marker}\n", style=f"dim yellow" if marker else "dim")
+        content.append("\n")
+
+    content.append(f"  Config file: ", style=f"dim {muted}")
+    content.append(str(CONFIG_FILE), style=f"dim {theme['bars'][2]['color']}")
+    content.append("\n", style=f"dim {muted}")
+    content.append(f"  Edit: ", style=f"dim {muted}")
+    content.append("smartfork config set <key> <value>", style=f"bold {theme['bars'][0]['color']}")
+    content.append("  |  ", style=f"dim {muted}")
+    content.append("smartfork config reset [key]", style=f"bold {theme['bars'][0]['color']}")
+    content.append("\n", style=f"dim {muted}")
+
+    console.print(Panel(
+        content,
+        title="[bold]SmartFork Configuration[/bold]",
+        border_style=theme["panel_border"],
+        box=box.ROUNDED,
+        padding=(1, 1),
     ))
 
-    table = Table(show_header=False)
-    table.add_column("Setting", style=info_color)
-    table.add_column("Value", style=success_color)
 
-    for key, value in config.model_dump().items():
-        table.add_row(key, str(value))
+@config_app.command("get")
+def config_get(key: str = typer.Argument(..., help="Config key to retrieve")):
+    """Get a single config value."""
+    config = get_config()
+    theme = get_theme_colors(getattr(config, "theme", DEFAULT_THEME))
+    if not hasattr(config, key):
+        console.print(f"[{theme['semantic']['error']}]Unknown config key: '{key}'[/{theme['semantic']['error']}]")
+        console.print(f"[dim]Run 'smartfork config' to see all available keys.[/dim]")
+        raise typer.Exit(1)
+    value = getattr(config, key)
+    console.print(f"[bold]{key}[/bold] = {value}")
 
-    console.print(table)
 
-
-@app.command("config-theme")
-def config_theme(
-    theme_name: Optional[str] = typer.Argument(None, help="Theme to set"),
-    list_all:   bool = typer.Option(False, "--list", "-l", help="List all themes"),
+@config_app.command("set")
+def config_set(
+    key: str = typer.Argument(..., help="Config key to set"),
+    value: str = typer.Argument(..., help="New value"),
 ):
-    """
-    Set or view the color theme.
-
-    Usage:
-        smartfork config-theme obsidian    # set theme
-        smartfork config-theme --list      # list all themes
-        smartfork config-theme             # show current
-    """
-    from .config import reload_config
-    config  = get_config()
-    current = getattr(config, "theme", DEFAULT_THEME)
-
-    if list_all or theme_name is None:
-        tbl = Table(show_header=True, box=box.SIMPLE)
-        tbl.add_column("Theme",  style="bold", width=12)
-        tbl.add_column("Description", style="dim", width=40)
-        tbl.add_column("",  width=10)
-        for tid, td in THEMES.items():
-            c0, c1, c2 = [b["color"] for b in td["bars"]]
-            swatch = f"[{c0}]▪[/{c0}][{c1}]▪[/{c1}][{c2}]▪[/{c2}] {td['name']}"
-            status = "[green]● active[/green]" if tid == current else ""
-            tbl.add_row(swatch, td["desc"], status)
-        console.print(Panel(tbl, title="[bold]SmartFork Themes[/bold]", box=box.ROUNDED))
-        if theme_name is None:
-            console.print(f"\n  Current: [bold]{current}[/bold]")
-            console.print(f"  Set with: [dim]smartfork config-theme <name>[/dim]\n")
-        return
-
-    theme_name = theme_name.lower()
-    if theme_name not in THEMES:
-        console.print(f"[red]Unknown theme '{theme_name}'[/red]")
-        console.print(f"[dim]Valid: {', '.join(THEMES.keys())}[/dim]")
+    """Set a config value with automatic type coercion and validation."""
+    config = get_config()
+    success, message = config.set_value(key, value)
+    if success:
+        theme = get_theme_colors(getattr(config, "theme", DEFAULT_THEME))
+        console.print(f"[bold {theme['semantic']['success']}]✓ {message}[/bold {theme['semantic']['success']}]")
+        console.print(f"[dim]Saved to {CONFIG_FILE}[/dim]")
+    else:
+        console.print(f"[{theme['semantic']['error']}]✗ {message}[/{theme['semantic']['error']}]")
         raise typer.Exit(1)
 
-    # Update and save config
-    config.theme = theme_name
-    config.save()
 
-    td = THEMES[theme_name]
-    c  = td["bars"][1]["color"]
-    console.print(f"\n  [{c}]✓[/{c}] Theme → [bold]{td['name']}[/bold] — {td['desc']}")
-    console.print(f"  [dim]Saved to {CONFIG_FILE}[/dim]\n")
+@config_app.command("reset")
+def config_reset(
+    key: Optional[str] = typer.Argument(None, help="Specific key to reset (omit to reset all)"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+):
+    """Reset config to defaults. Reset all fields or a specific one."""
+    config = get_config()
+    theme = get_theme_colors(getattr(config, "theme", DEFAULT_THEME))
+
+    if key:
+        if not force:
+            default_val = getattr(SmartForkConfig(), key, None)
+            current_val = getattr(config, key, None)
+            console.print(f"Reset [bold]{key}[/bold] from [{theme['semantic']['warning']}]{current_val}[/{theme['semantic']['warning']}] → [{theme['semantic']['success']}]{default_val}[/{theme['semantic']['success']}]?")
+            confirm = input("Confirm (yes/no): ").strip().lower()
+            if confirm not in ("yes", "y"):
+                console.print("[dim]Aborted.[/dim]")
+                raise typer.Exit(0)
+        try:
+            config.reset(key)
+            console.print(f"[bold {theme['semantic']['success']}]✓ {key} reset to default[/bold {theme['semantic']['success']}]")
+        except ValueError as e:
+            console.print(f"[{theme['semantic']['error']}]{e}[/{theme['semantic']['error']}]")
+            raise typer.Exit(1)
+    else:
+        if not force:
+            console.print(f"[bold {theme['semantic']['warning']}]Reset ALL config values to defaults?[/bold {theme['semantic']['warning']}]")
+            confirm = input("Confirm (yes/no): ").strip().lower()
+            if confirm not in ("yes", "y"):
+                console.print("[dim]Aborted.[/dim]")
+                raise typer.Exit(0)
+        config.reset()
+        console.print(f"[bold {theme['semantic']['success']}]✓ All config values reset to defaults[/bold {theme['semantic']['success']}]")
+    console.print(f"[dim]Saved to {CONFIG_FILE}[/dim]")
+
+
+@config_app.command("path")
+def config_path():
+    """Show the config file location."""
+    config = get_config()
+    theme = get_theme_colors(getattr(config, "theme", DEFAULT_THEME))
+    console.print(f"[bold]Config file:[/bold] {CONFIG_FILE}")
+    if CONFIG_FILE.exists():
+        size = CONFIG_FILE.stat().st_size
+        console.print(f"[dim]Exists: yes ({size} bytes)[/dim]")
+    else:
+        console.print(f"[{theme['semantic']['warning']}]Does not exist yet (using defaults)[/{theme['semantic']['warning']}]")
+
+
+@config_app.command("validate")
+def config_validate():
+    """Validate current configuration."""
+    config = get_config()
+    theme = get_theme_colors(getattr(config, "theme", DEFAULT_THEME))
+    errors = config.validate_all()
+
+    if not errors:
+        console.print(f"[bold {theme['semantic']['success']}]✓ Configuration is valid[/bold {theme['semantic']['success']}]")
+    else:
+        console.print(f"[bold {theme['semantic']['error']}]✗ {len(errors)} validation error(s):[/bold {theme['semantic']['error']}]")
+        for err in errors:
+            console.print(f"  [{theme['semantic']['error']}]• {err}[/{theme['semantic']['error']}]")
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -1012,7 +505,7 @@ def reset(
     
     # Theme-aware colors
     success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
+    warning_color = semantic.get("warning", theme["text_primary"])
     
     if not force:
         confirm = typer.confirm("Are you sure you want to delete all indexed data?")
@@ -1037,8 +530,8 @@ def watch():
     # Theme-aware colors
     info_color = semantic.get("info", theme["text_primary"])
     success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
-    error_color = semantic.get("error", "#EF4444")
+    warning_color = semantic.get("warning", theme["text_primary"])
+    error_color = semantic.get("error", theme["text_primary"])
     
     if not config.kilo_code_tasks_path.exists():
         console.print(f"[{error_color}]Error: Tasks path does not exist: {config.kilo_code_tasks_path}[/{error_color}]")
@@ -1083,8 +576,8 @@ def compaction_check(
     # Theme-aware colors
     info_color = semantic.get("info", theme["text_primary"])
     success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
-    error_color = semantic.get("error", "#EF4444")
+    warning_color = semantic.get("warning", theme["text_primary"])
+    error_color = semantic.get("error", theme["text_primary"])
     accent_color = semantic.get("accent", theme["text_primary"])
     
     hook = PreCompactionHook(threshold_messages, threshold_days)
@@ -1138,8 +631,8 @@ def compaction_export(
     # Theme-aware colors
     info_color = semantic.get("info", theme["text_primary"])
     success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
-    error_color = semantic.get("error", "#EF4444")
+    warning_color = semantic.get("warning", theme["text_primary"])
+    error_color = semantic.get("error", theme["text_primary"])
     accent_color = semantic.get("accent", theme["text_primary"])
     
     manager = CompactionManager()
@@ -1173,59 +666,6 @@ def compaction_export(
             )
         
         console.print(table)
-
-
-@app.command()
-def cluster_analysis():
-    """Analyze session clusters and find duplicates."""
-    from .intelligence.clustering import SessionClusterer
-    
-    config = get_config()
-    theme_name = getattr(config, "theme", DEFAULT_THEME)
-    theme = get_theme_colors(theme_name)
-    semantic = theme.get("semantic", {})
-    
-    # Theme-aware colors
-    info_color = semantic.get("info", theme["text_primary"])
-    success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
-    error_color = semantic.get("error", "#EF4444")
-    accent_color = semantic.get("accent", theme["text_primary"])
-    
-    clusterer = SessionClusterer()
-    
-    with console.status(f"[bold {info_color}]Analyzing clusters..."):
-        analysis = clusterer.analyze_clusters()
-    
-    console.print(Panel.fit(
-        f"[bold {info_color}]{analysis['total_clusters']} clusters found[/bold {info_color}]\n"
-        f"{analysis['noise_sessions']} unclustered sessions\n"
-        f"{analysis['potential_duplicates']} potential duplicates",
-        title="Cluster Analysis",
-        border_style=theme["panel_border"]
-    ))
-    
-    if analysis['clusters']:
-        table = Table(show_header=True)
-        table.add_column("Cluster", style=info_color, justify="right")
-        table.add_column("Sessions", style=success_color, justify="right")
-        table.add_column("Top Topics", style=accent_color)
-        
-        for cluster in analysis['clusters'][:10]:
-            topics = ", ".join(cluster.get('common_topics', [])[:5]) if cluster.get('common_topics') else "-"
-            table.add_row(
-                str(cluster['cluster_id']),
-                str(cluster['session_count']),
-                topics
-            )
-        
-        console.print(f"\n[bold {info_color}]Top Clusters:[/bold {info_color}]")
-        console.print(table)
-    
-    if analysis['duplicate_pairs']:
-        console.print(f"\n[bold {warning_color}]Potential Duplicates:[/bold {warning_color}]")
-        for a, b, sim in analysis['duplicate_pairs'][:5]:
-            console.print(f"  • {a[:16]}... ↔ {b[:16]}... ({sim:.1%})")
 
 
 @app.command()
@@ -1334,441 +774,47 @@ def tree_export(
 
 
 @app.command()
-def vault_add(
-    session_id: str = typer.Argument(..., help="Session ID to add to vault"),
-    password: Optional[str] = typer.Option(None, "--password", "-p", help="Encryption password"),
-):
-    """Add a session to the privacy vault."""
-    from .intelligence.privacy import PrivacyVault
-    
-    config = get_config()
-    theme_name = getattr(config, "theme", DEFAULT_THEME)
-    theme = get_theme_colors(theme_name)
-    semantic = theme.get("semantic", {})
-    
-    # Theme-aware colors
-    info_color = semantic.get("info", theme["text_primary"])
-    success_color = semantic.get("success", theme["done_color"])
-    error_color = semantic.get("error", "#EF4444")
-    
-    if not password:
-        password = typer.prompt("Enter vault password", hide_input=True)
-    
-    vault = PrivacyVault(password)
-    
-    # Find session directory
-    task_dir = config.kilo_code_tasks_path / session_id
-    if not task_dir.exists():
-        console.print(f"[{error_color}]Session not found: {session_id}[/{error_color}]")
-        raise typer.Exit(1)
-    
-    with console.status(f"[bold {info_color}]Adding to vault..."):
-        success = vault.add_to_vault(session_id, task_dir)
-    
-    if success:
-        console.print(f"[{success_color}]OK Session {session_id[:16]}... added to vault[/{success_color}]")
-    else:
-        console.print(f"[{error_color}]Failed to add to vault[/{error_color}]")
-
-
-@app.command()
-def vault_list():
-    """List vaulted sessions."""
-    from .intelligence.privacy import PrivacyVault
-    
-    config = get_config()
-    theme_name = getattr(config, "theme", DEFAULT_THEME)
-    theme = get_theme_colors(theme_name)
-    semantic = theme.get("semantic", {})
-    
-    # Theme-aware colors
-    info_color = semantic.get("info", theme["text_primary"])
-    success_color = semantic.get("success", theme["done_color"])
-    accent_color = semantic.get("accent", theme["text_primary"])
-    
-    vault = PrivacyVault()
-    sessions = vault.list_vaulted_sessions()
-    
-    if not sessions:
-        console.print(f"[{theme['text_muted']}]No sessions in vault[/{theme['text_muted']}]")
-        return
-    
-    console.print(Panel.fit(
-        f"[bold {info_color}]{len(sessions)} vaulted sessions[/bold {info_color}]",
-        title="Privacy Vault",
-        border_style=theme["panel_border"]
-    ))
-    
-    table = Table(show_header=True)
-    table.add_column("Session", style=info_color)
-    table.add_column("Vaulted At", style=success_color)
-    table.add_column("Files", style=accent_color, justify="right")
-    
-    for session in sessions:
-        table.add_row(
-            session["session_id"][:20],
-            session.get("vaulted_at", "unknown"),
-            str(session.get("file_count", 0))
-        )
-    
-    console.print(table)
-
-
-@app.command()
-def vault_restore(
-    session_id: str = typer.Argument(..., help="Session ID to restore"),
-    password: Optional[str] = typer.Option(None, "--password", "-p", help="Decryption password"),
-    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output directory"),
-):
-    """Restore a session from the vault."""
-    from .intelligence.privacy import PrivacyVault
-    
-    config = get_config()
-    theme_name = getattr(config, "theme", DEFAULT_THEME)
-    theme = get_theme_colors(theme_name)
-    semantic = theme.get("semantic", {})
-    
-    # Theme-aware colors
-    info_color = semantic.get("info", theme["text_primary"])
-    success_color = semantic.get("success", theme["done_color"])
-    error_color = semantic.get("error", "#EF4444")
-    
-    if not password:
-        password = typer.prompt("Enter vault password", hide_input=True)
-    
-    vault = PrivacyVault(password)
-    
-    with console.status(f"[bold {info_color}]Restoring from vault..."):
-        result = vault.restore_from_vault(session_id, output)
-    
-    if result:
-        console.print(f"[{success_color}]OK Session restored to: {result}[/{success_color}]")
-    else:
-        console.print(f"[{error_color}]Failed to restore session[/{error_color}]")
-
-
-@app.command()
-def vault_search(
-    query: str = typer.Argument(..., help="Search query"),
-    password: Optional[str] = typer.Option(None, "--password", "-p", help="Decryption password"),
-):
-    """Search within vaulted sessions."""
-    from .intelligence.privacy import PrivacyVault
-    
-    config = get_config()
-    theme_name = getattr(config, "theme", DEFAULT_THEME)
-    theme = get_theme_colors(theme_name)
-    semantic = theme.get("semantic", {})
-    
-    # Theme-aware colors
-    info_color = semantic.get("info", theme["text_primary"])
-    accent_color = semantic.get("accent", theme["text_primary"])
-    
-    if not password:
-        password = typer.prompt("Enter vault password", hide_input=True)
-    
-    vault = PrivacyVault(password)
-    
-    with console.status(f"[bold {info_color}]Searching vault..."):
-        results = vault.search_vault(query)
-    
-    console.print(Panel.fit(
-        f"[bold {info_color}]{len(results)} results[/bold {info_color}]",
-        title="Vault Search",
-        border_style=theme["panel_border"]
-    ))
-    
-    for r in results[:10]:
-        console.print(Panel(
-            f"[{theme['text_muted']}]{r['preview']}[/{theme['text_muted']}]",
-            title=f"{r['session_id'][:16]}... / {r['file']}",
-            border_style=theme["panel_border"]
-        ))
-
-
-# Phase 3: Testing and Metrics Commands
-
-@app.command()
-def test(
-    suite: Optional[str] = typer.Option(None, "--suite", "-s", help="Test suite to run (indexer, search, database, fork)"),
-):
-    """Run SmartFork tests."""
-    from .testing.test_runner import create_default_test_runner
-    
-    config = get_config()
-    theme_name = getattr(config, "theme", DEFAULT_THEME)
-    theme = get_theme_colors(theme_name)
-    semantic = theme.get("semantic", {})
-    
-    # Theme-aware colors
-    info_color = semantic.get("info", theme["text_primary"])
-    success_color = semantic.get("success", theme["done_color"])
-    error_color = semantic.get("error", "#EF4444")
-    accent_color = semantic.get("accent", theme["text_primary"])
-    
-    runner = create_default_test_runner()
-    
-    if suite:
-        with console.status(f"[bold {info_color}]Running {suite} tests..."):
-            result = runner.run_suite(suite)
-        suites = [result]
-    else:
-        with console.status(f"[bold {info_color}]Running all tests..."):
-            suites = runner.run_all()
-    
-    # Display results
-    for suite in suites:
-        suite_color = success_color if suite.failed_count == 0 else error_color
-        console.print(Panel.fit(
-            f"[bold {suite_color}]{suite.passed_count}/{len(suite.tests)} passed[/bold {suite_color}]\n"
-            f"Duration: {suite.total_duration_ms:.0f}ms",
-            title=f"Test Suite: {suite.name}",
-            border_style=theme["panel_border"]
-        ))
-        
-        if suite.failed_count > 0:
-            table = Table(show_header=True)
-            table.add_column("Test", style=info_color)
-            table.add_column("Status", style=error_color)
-            table.add_column("Error", style=theme["text_muted"])
-            
-            for test in suite.tests:
-                if not test.passed:
-                    table.add_row(
-                        test.name,
-                        "FAILED",
-                        test.error_message[:50] + "..." if test.error_message and len(test.error_message) > 50 else (test.error_message or "")
-                    )
-            
-            console.print(table)
-    
-    summary = runner.get_summary()
-    console.print(f"\n[{theme['text_muted']}]Total: {summary['passed']}/{summary['total_tests']} passed "
-                  f"({summary['pass_rate']:.1%})[/{theme['text_muted']}]")
-
-
-@app.command()
-def metrics(
-    days: int = typer.Option(7, "--days", "-d", help="Number of days to show"),
-):
-    """Show success metrics dashboard."""
-    from .testing.metrics_tracker import MetricsTracker
-    
-    config = get_config()
-    theme_name = getattr(config, "theme", DEFAULT_THEME)
-    theme = get_theme_colors(theme_name)
-    semantic = theme.get("semantic", {})
-    
-    # Theme-aware colors
-    info_color = semantic.get("info", theme["text_primary"])
-    success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
-    error_color = semantic.get("error", "#EF4444")
-    accent_color = semantic.get("accent", theme["text_primary"])
-    
-    tracker = MetricsTracker()
-    data = tracker.get_dashboard_data(days)
-    
-    console.print(Panel.fit(
-        f"[bold {info_color}]Success Metrics[/bold {info_color}] (last {data['period_days']} days)",
-        title="Metrics Dashboard",
-        border_style=theme["panel_border"]
-    ))
-    
-    # Key metrics
-    table = Table(show_header=True)
-    table.add_column("Metric", style=info_color)
-    table.add_column("Value", style=success_color)
-    
-    km = data['key_metrics']
-    table.add_row("Unique Sessions", str(data['unique_sessions']))
-    table.add_row("Avg Fork Gen Time", f"{km['avg_fork_generation_time_ms']:.0f}ms")
-    table.add_row("Context Recovered", f"{km['total_context_recovered_mb']:.1f}MB")
-    table.add_row("Sessions/Day", f"{km['sessions_per_day']:.1f}")
-    
-    console.print(table)
-    
-    # Metric summaries
-    if data['metric_summaries']:
-        console.print(f"\n[bold {info_color}]Metric Trends:[/bold {info_color}]")
-        for name, summary in data['metric_summaries'].items():
-            trend_color_map = {
-                'improving': success_color,
-                'stable': warning_color,
-                'degrading': error_color,
-                'insufficient_data': theme["text_muted"]
-            }
-            trend_color = trend_color_map.get(summary['trend'], theme["text_primary"])
-            
-            console.print(f"  {name}: {summary['mean']:.2f} "
-                          f"([{trend_color}]{summary['trend']}[/{trend_color}])")
-
-
-@app.command()
-def ab_test_status():
-    """Show A/B test status."""
-    from .testing.ab_testing import ABTestManager
-    
-    config = get_config()
-    theme_name = getattr(config, "theme", DEFAULT_THEME)
-    theme = get_theme_colors(theme_name)
-    semantic = theme.get("semantic", {})
-    
-    # Theme-aware colors
-    info_color = semantic.get("info", theme["text_primary"])
-    success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
-    accent_color = semantic.get("accent", theme["text_primary"])
-    
-    manager = ABTestManager()
-    summary = manager.get_test_summary()
-    
-    console.print(Panel.fit(
-        f"[bold {info_color}]{summary['total_tests']}[/bold {info_color}] active tests\n"
-        f"[bold {info_color}]{summary['total_sessions']}[/bold {info_color}] test sessions",
-        title="A/B Testing",
-        border_style=theme["panel_border"]
-    ))
-    
-    if summary['active_tests']:
-        table = Table(show_header=True)
-        table.add_column("Test", style=info_color)
-        table.add_column("Sessions", style=success_color, justify="right")
-        table.add_column("Control", style=accent_color, justify="right")
-        table.add_column("Treatment", style=warning_color, justify="right")
-        table.add_column("Result", style=info_color)
-        
-        for test in summary['active_tests']:
-            result_str = "No data"
-            if test['result']:
-                sig = "sig" if test['result']['significant'] else "not sig"
-                result_str = f"{test['result']['improvement_pct']:+.1f}% ({sig})"
-            
-            table.add_row(
-                test['name'],
-                str(test['total_sessions']),
-                str(test['control']),
-                str(test['treatment']),
-                result_str
-            )
-        
-        console.print(table)
-
-
-@app.command()
 def update_titles(
     force: bool = typer.Option(False, "--force", "-f", help="Force regeneration of all titles"),
     dry_run: bool = typer.Option(False, "--dry-run", "-d", help="Show what would be generated without updating"),
 ):
-    """Generate or update session titles for all indexed sessions."""
+    """Update session titles for v2-indexed sessions.
+    
+    Note: Session titles are now auto-generated at index time using the task description.
+    This command is retained for compatibility but titles are stored in SQLite.
+    """
     config = get_config()
     theme_name = getattr(config, "theme", DEFAULT_THEME)
     theme = get_theme_colors(theme_name)
     semantic = theme.get("semantic", {})
     
-    # Theme-aware colors
     info_color = semantic.get("info", theme["text_primary"])
     success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
-    error_color = semantic.get("error", "#EF4444")
-    accent_color = semantic.get("accent", theme["text_primary"])
+    warning_color = semantic.get("warning", theme["text_primary"])
     
-    db = ChromaDatabase(config.chroma_db_path)
+    from .database.metadata_store import MetadataStore
     
-    if db.get_session_count() == 0:
+    store = MetadataStore(config.sqlite_db_path)
+    session_count = store.get_session_count()
+    
+    if session_count == 0:
         console.print(f"[{warning_color}]No sessions indexed. Run 'smartfork index' first.[/{warning_color}]")
+        store.close()
         raise typer.Exit(1)
     
-    # Get all unique sessions
-    session_ids = db.get_unique_sessions()
-    
-    if not session_ids:
-        console.print(f"[{warning_color}]No sessions found in database.[/{warning_color}]")
-        raise typer.Exit(0)
+    all_sessions = store.get_all_sessions()
+    store.close()
     
     console.print(Panel.fit(
-        f"[bold {info_color}]Update Session Titles[/bold {info_color}]\n"
-        f"Found {len(session_ids)} sessions to process",
+        f"[bold {info_color}]Session Titles[/bold {info_color}]\n"
+        f"Total: {session_count} sessions\n"
+        f"Note: Titles are auto-generated from task descriptions at index time",
         title="SmartFork",
         border_style=theme["panel_border"]
     ))
     
-    # Initialize title generator
-    title_gen = TitleGenerator()
-    title_manager = TitleManager(db, title_gen)
-    parser = KiloCodeParser()
-    
-    # Track results
-    updated = 0
-    skipped = 0
-    failed = 0
-    
-    # Process each session
-    with console.status(f"[bold {info_color}]Generating titles...") as status:
-        for i, session_id in enumerate(session_ids):
-            try:
-                # Check if session already has a title (unless force)
-                if not force:
-                    chunks = db.get_session_chunks(session_id)
-                    if chunks and chunks[0].metadata.session_title:
-                        skipped += 1
-                        continue
-                
-                # Parse the session to get full content
-                task_dir = config.kilo_code_tasks_path / session_id
-                if not task_dir.exists():
-                    failed += 1
-                    logger.warning(f"Session directory not found: {task_dir}")
-                    continue
-                
-                session = parser.parse_task_directory(task_dir)
-                if not session:
-                    failed += 1
-                    logger.warning(f"Could not parse session: {session_id}")
-                    continue
-                
-                # Generate title
-                title = title_manager.generate_and_store_title(session)
-                
-                if dry_run:
-                    console.print(f"[{theme['text_muted']}]{session_id[:16]}...[/{theme['text_muted']}] -> {title}")
-                else:
-                    # Re-index the session to store the new title
-                    # Note: This requires re-indexing since ChromaDB doesn't support metadata updates
-                    indexer = FullIndexer(
-                        db,
-                        chunk_size=config.chunk_size,
-                        chunk_overlap=config.chunk_overlap,
-                        batch_size=config.batch_size
-                    )
-                    indexer.index_session(task_dir)
-                    # CRITICAL: Finalize to flush pending chunks immediately
-                    indexer.finalize()
-                    
-                updated += 1
-                
-                if (i + 1) % 10 == 0:
-                    status.update(f"[bold {info_color}]Processed {i + 1}/{len(session_ids)} sessions...")
-                    
-            except Exception as e:
-                logger.error(f"Failed to update title for {session_id}: {e}")
-                failed += 1
-            
-            # Small delay in lite mode to reduce CPU usage
-            if config.lite_mode and i % 5 == 0:
-                time.sleep(0.1)
-    
-    # Display results
-    console.print(f"\n[bold {info_color}]Results:[/bold {info_color}]")
-    console.print(f"  [{success_color}]Updated:[/{success_color}] {updated}")
-    console.print(f"  [{warning_color}]Skipped:[/{warning_color}] {skipped}")
-    if failed > 0:
-        console.print(f"  [{error_color}]Failed:[/{error_color}] {failed}")
-    
-    if dry_run:
-        console.print(f"\n[{theme['text_muted']}]This was a dry run. Use without --dry-run to apply changes.[/{theme['text_muted']}]")
-    else:
-        console.print(f"\n[{success_color}]Title update complete![/{success_color}]")
+    console.print(f"\n[{success_color}]✓ Titles are managed automatically at index time[/{success_color}]")
+    console.print(f"[{theme['text_muted']}]Use 'smartfork session-list' to view sessions[/{theme['text_muted']}]")
 
 
 @app.command()
@@ -1781,7 +827,7 @@ def interactive():
     
     # Theme-aware colors
     info_color = semantic.get("info", theme["text_primary"])
-    error_color = semantic.get("error", "#EF4444")
+    error_color = semantic.get("error", theme["text_primary"])
     
     console.print(Panel.fit(
         f"[bold {info_color}]SmartFork Interactive Mode[/bold {info_color}]\n"
@@ -1802,8 +848,8 @@ def interactive():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-@app.command("index-v2")
-def index_v2(
+@app.command()
+def index(
     force: bool = typer.Option(False, "--force", "-f", help="Force full re-index"),
     skip_embeddings: bool = typer.Option(False, "--skip-embeddings", help="Parse + SQLite only, skip vector embeddings"),
 ):
@@ -1818,8 +864,8 @@ def index_v2(
     semantic = theme.get("semantic", {})
     info_color = semantic.get("info", theme["text_primary"])
     success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
-    error_color = semantic.get("error", "#EF4444")
+    warning_color = semantic.get("warning", theme["text_primary"])
+    error_color = semantic.get("error", theme["text_primary"])
 
     from .indexer.session_parser import SessionParser
     from .indexer.session_scanner import SessionScanner
@@ -2040,8 +1086,8 @@ def index_v2(
     store.close()
 
 
-@app.command("summarize-v2")
-def summarize_v2(
+@app.command()
+def summarize(
     force: bool = typer.Option(False, "--force", "-f", help="Regenerate all summaries"),
 ):
     """Generate LLM summaries for all indexed sessions.
@@ -2055,7 +1101,7 @@ def summarize_v2(
     semantic = theme.get("semantic", {})
     info_color = semantic.get("info", theme["text_primary"])
     success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
+    warning_color = semantic.get("warning", theme["text_primary"])
 
     from .database.metadata_store import MetadataStore
     from .search.embedder import check_ollama_available, get_embedder
@@ -2164,8 +1210,8 @@ def summarize_v2(
 
 
 
-@app.command("search-v2")
-def search_v2(
+@app.command()
+def search(
     query: str = typer.Argument(..., help="Search query"),
     n_results: int = typer.Option(5, "--results", "-n", help="Number of results"),
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project name"),
@@ -2181,7 +1227,7 @@ def search_v2(
     semantic = theme.get("semantic", {})
     info_color = semantic.get("info", theme["text_primary"])
     success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
+    warning_color = semantic.get("warning", theme["text_primary"])
 
     from .database.metadata_store import MetadataStore
     from .search.query_decomposer import QueryDecomposer, get_vector_weights
@@ -2329,14 +1375,14 @@ def search_v2(
                     "files": c.files_changed} for c in cards]
         console.print(json.dumps(output, indent=2, default=str))
     else:
-        render_result_cards(cards, console)
+        render_result_cards(cards, console, theme_name=theme_name)
         console.print(f"\n[{theme['text_muted']}]Use [bold]smartfork fork-v2 <session_id> --intent continue|reference|debug[/bold][/{theme['text_muted']}]")
 
     store.close()
 
 
-@app.command("fork-v2")
-def fork_v2(
+@app.command()
+def fork(
     session_id: str = typer.Argument(..., help="Session ID to fork context from"),
     intent: str = typer.Option("continue", "--intent", "-i",
                                 help="Fork intent: continue, reference, or debug"),
@@ -2351,7 +1397,7 @@ def fork_v2(
     semantic = theme.get("semantic", {})
     info_color = semantic.get("info", theme["text_primary"])
     success_color = semantic.get("success", theme["done_color"])
-    error_color = semantic.get("error", "#EF4444")
+    error_color = semantic.get("error", theme["text_primary"])
 
     from .database.metadata_store import MetadataStore
     from .fork.fork_assembler import assemble_fork_context
@@ -2427,13 +1473,18 @@ def fork_v2(
     # Preview
     console.print(f"\n[{theme['text_muted']}]Preview:[/{theme['text_muted']}]")
     preview = context[:600] + ("..." if len(context) > 600 else "")
-    console.print(Panel(preview, border_style=theme["panel_border"]))
+    
+    try:
+        from .ui.markdown_render import render_markdown_panel
+        render_markdown_panel(preview, title="Fork Preview", theme_name=theme_name, console=console)
+    except Exception:
+        console.print(Panel(preview, border_style=theme["panel_border"]))
 
     store.close()
 
 
-@app.command("status-v2")
-def status_v2():
+@app.command()
+def status():
     """Show v2 index statistics — sessions, projects, domains, vectors."""
     config = get_config()
     theme_name = getattr(config, "theme", DEFAULT_THEME)
@@ -2441,7 +1492,7 @@ def status_v2():
     semantic = theme.get("semantic", {})
     info_color = semantic.get("info", theme["text_primary"])
     success_color = semantic.get("success", theme["done_color"])
-    warning_color = semantic.get("warning", "#F59E0B")
+    warning_color = semantic.get("warning", theme["text_primary"])
 
     from .database.metadata_store import MetadataStore
 
@@ -2849,7 +1900,7 @@ SORT session_start DESC
             project_file = projects_dir / (project + ".md")
             project_file.write_text(project_moc, encoding='utf-8')
 
-    console.print(f"[green]Obsidian vault generated at:[/green] {vault_path}")
+    console.print(f"[{theme['semantic']['success']}]Obsidian vault generated at:[/{theme['semantic']['success']}] {vault_path}")
     console.print(f"  Sessions: {len(session_info)} notes in Sessions/")
     console.print(f"  MOC: Mermaid graph + Dataview queries in MOC.md")
     console.print(f"  Graph: Dedicated graph view in _Graph/Graph View.md")
@@ -2876,7 +1927,7 @@ def visualize_supersessions(
         links = store.conn.execute('SELECT session_id, superseded_id, confidence FROM session_supersessions').fetchall()
 
         if not links:
-            console.print("[yellow]No supersession relationships found to visualize.[/yellow]")
+            console.print(f"[{theme['semantic']['warning']}]No supersession relationships found to visualize.[/{theme['semantic']['warning']}]")
             return
 
         sessions = set()
@@ -3541,7 +2592,7 @@ def visualize_supersessions(
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(html_content)
 
-        console.print(f"[green]Visualization saved to {output_file}. Opening in browser...[/green]")
+        console.print(f"[{theme['semantic']['success']}]Visualization saved to {output_file}. Opening in browser...[/{theme['semantic']['success']}]")
 
         import webbrowser
         webbrowser.open(f"file://{Path(output_file).resolve()}")

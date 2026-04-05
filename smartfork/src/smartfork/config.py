@@ -267,6 +267,99 @@ class SmartForkConfig(BaseSettings):
     def is_animation_enabled(self) -> bool:
         """Check if animations should be enabled."""
         return not (self.lite_mode or self.disable_animations)
+    
+    def reset(self, key: Optional[str] = None) -> None:
+        """Reset config to defaults.
+        
+        Args:
+            key: Specific field to reset. If None, resets ALL fields.
+        """
+        defaults = SmartForkConfig()
+        if key:
+            if not hasattr(defaults, key):
+                raise ValueError(f"Unknown config key: '{key}'")
+            setattr(self, key, getattr(defaults, key))
+        else:
+            for field_name in defaults.model_fields:
+                if hasattr(self, field_name) and field_name not in ("kilo_code_tasks_path", "qdrant_db_path", "cache_dir", "sqlite_db_path"):
+                    setattr(self, field_name, getattr(defaults, field_name))
+        self.save()
+    
+    def validate_all(self) -> list:
+        """Validate all config fields against their constraints.
+        
+        Returns:
+            List of error strings. Empty list means all valid.
+        """
+        errors = []
+        for field_name, field_info in self.model_fields.items():
+            value = getattr(self, field_name, None)
+            if field_name in ("kilo_code_tasks_path", "qdrant_db_path", "cache_dir", "sqlite_db_path"):
+                if value and not Path(str(value)).parent.exists():
+                    errors.append(f"{field_name}: directory does not exist")
+                continue
+            if field_name == "theme":
+                valid = {"phosphor", "obsidian", "ember", "arctic", "iron", "tungsten"}
+                if value.lower() not in valid:
+                    errors.append(f"theme: must be one of {', '.join(sorted(valid))}")
+                continue
+            if field_info.metadata:
+                for constraint in field_info.metadata:
+                    if hasattr(constraint, "ge") and constraint.ge is not None:
+                        if value < constraint.ge:
+                            errors.append(f"{field_name}: must be >= {constraint.ge} (got {value})")
+                    if hasattr(constraint, "le") and constraint.le is not None:
+                        if value > constraint.le:
+                            errors.append(f"{field_name}: must be <= {constraint.le} (got {value})")
+        return errors
+    
+    def set_value(self, key: str, value_str: str) -> tuple:
+        """Set a config field from a string value with type coercion and validation.
+        
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        if not hasattr(self, key):
+            return False, f"Unknown config key: '{key}'. Run 'smartfork config' to see all available keys."
+        field_info = self.model_fields.get(key)
+        if not field_info:
+            return False, f"Cannot set field '{key}' (not configurable)."
+        field_type = field_info.annotation
+        try:
+            if field_type == bool:
+                if value_str.lower() in ("true", "1", "yes", "on"):
+                    parsed = True
+                elif value_str.lower() in ("false", "0", "no", "off"):
+                    parsed = False
+                else:
+                    return False, f"{key}: expected true/false, got '{value_str}'"
+            elif field_type == int:
+                parsed = int(value_str)
+            elif field_type == str:
+                parsed = value_str
+            elif field_type == Optional[Path] or field_type == Path:
+                parsed = Path(value_str)
+            else:
+                parsed = value_str
+        except (ValueError, TypeError) as e:
+            return False, f"{key}: cannot convert '{value_str}' to {field_type.__name__}: {e}"
+        # Validate constraints manually (setattr bypasses Pydantic validation)
+        if isinstance(parsed, int) and field_info.metadata:
+            for constraint in field_info.metadata:
+                if hasattr(constraint, "ge") and constraint.ge is not None and parsed < constraint.ge:
+                    return False, f"{key}: must be >= {constraint.ge} (got {parsed})"
+                if hasattr(constraint, "le") and constraint.le is not None and parsed > constraint.le:
+                    return False, f"{key}: must be <= {constraint.le} (got {parsed})"
+        if key == "theme":
+            valid = {"phosphor", "obsidian", "ember", "arctic", "iron", "tungsten"}
+            if parsed.lower() not in valid:
+                return False, f"theme: must be one of {', '.join(sorted(valid))}"
+        try:
+            setattr(self, key, parsed)
+            self.save()
+            return True, f"{key} = {parsed}"
+        except Exception as e:
+            return False, f"{key}: validation failed: {e}"
 
 
 # Global config instance

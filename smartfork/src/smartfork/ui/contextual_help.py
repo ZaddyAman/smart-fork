@@ -123,8 +123,8 @@ class ContextualHelpManager:
         return {
             "info": semantic.get("info", theme["text_primary"]),
             "success": semantic.get("success", theme["done_color"]),
-            "warning": semantic.get("warning", "#F59E0B"),
-            "error": semantic.get("error", "#EF4444"),
+            "warning": semantic.get("warning", theme["text_primary"]),
+            "error": semantic.get("error", theme["text_primary"]),
             "accent": semantic.get("accent", theme["text_primary"]),
             "text_primary": theme["text_primary"],
             "text_muted": theme["text_muted"],
